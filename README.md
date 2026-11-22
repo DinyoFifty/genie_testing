@@ -4,15 +4,20 @@ Collect distance measurements from an initiator and reflector, save report figur
 
 ## First-time setup
 
-The tested setup uses Windows, Python 3.11, and BRD2606A boards. Install these tools once on each laptop.
+The tested setup uses 64-bit Windows and BRD2606A boards. Install these applications once on each laptop.
 
-- [Python 3.11](https://www.python.org/downloads/) with **Add Python to PATH** enabled.
 - [Visual Studio Code](https://code.visualstudio.com/).
-- [Simplicity Studio 6 and Silicon Labs tools](https://www.silabs.com/software-and-tools/simplicity-studio), including Simplicity SDK **2026.6.2**, Channel Sounding Analyzer **1.2.2**, ARM GCC **14.2.rel1**, Simplicity Commander, CMake **3.25 or newer**, and Ninja.
+- [Simplicity Studio 6 and Simplicity Installer](https://www.silabs.com/software-and-tools/simplicity-studio).
 
-Extract the entire ZIP into a short local path such as `C:\Projects\genie_testing`. Double-click [setup.cmd](setup.cmd). An internet connection is needed for Python dependencies and the VS Code Python extension.
+Extract the entire ZIP into a short local path such as `C:\Projects\genie_testing`. Double-click [setup.cmd](setup.cmd) in **File Explorer**. It opens the project in VS Code when finished, so you do not need to open VS Code first. Keep the setup window open until it says setup is complete. An internet connection is needed for missing downloads.
 
-Setup checks the installed tools, creates the local Python environment, installs the Python dependencies and Genie Files sidebar, refreshes SDK and compiler paths, and opens [genie_testing.code-workspace](genie_testing.code-workspace). Run setup again after moving the project or installing missing tools. A missing prerequisite is printed in the setup window.
+Setup reuses an available 64-bit Python **3.11**, or downloads the official **3.11.9** Windows installer and installs it for your Windows account. It verifies the download's SHA-256 checksum and continues without requiring a terminal restart. An existing Python of another version can remain installed.
+
+Using the command line tool included with Simplicity Installer, setup installs missing Simplicity SDK **2026.6.2**, Channel Sounding Analyzer **1.2.2**, ARM GCC **14.2.rel1**, Simplicity Commander, CMake, and Ninja packages. Large SDK downloads can take several minutes. If Silicon Labs requires a sign-in or package access, setup prints the affected packages; open Simplicity Installer to complete that step, then run setup again.
+
+Setup also creates or repairs the project's local Python environment, installs and checks the Python dependencies, installs the Python, Pylance, Python Debugger, C/C++, and Genie Files extensions, refreshes SDK and compiler paths, and opens [genie_testing.code-workspace](genie_testing.code-workspace). Run setup again after moving the project or pulling updates. It reuses the tools and extensions already installed. These installation scripts support Windows.
+
+If setup fails, send the complete error and [data/setup/setup.log](data/setup/setup.log). Once Python starts, [data/setup/setup-report.json](data/setup/setup-report.json) also records the failed stage, discovered tool paths, and checked package versions. Both files stay local and are excluded from Git and the teammate ZIP.
 
 If VS Code asks, trust your extracted project and select its `.venv\Scripts\python.exe` with **Python > Select Interpreter**. Use **Run Python File** for the scripts below. The commands below also work directly in the terminal. Restart VS Code if a newly installed extension requests it.
 
@@ -153,7 +158,7 @@ For ZIP updates, extract the new version into a separate folder, run setup there
 
 Ask them to send the following information with each problem.
 
-- The complete terminal error and the script or step that failed.
+- The complete terminal error and the script or step that failed; for setup problems, include [data/setup/setup.log](data/setup/setup.log) and [data/setup/setup-report.json](data/setup/setup-report.json) if present.
 - Their code version or the ZIP date and whether setup completed.
 - Board model, selected antenna mode, offset values, initiator COM port, and how the reflector is powered.
 - The Analyzer error or log when connection fails. For a saved trial, include its `capture/summary.json` and the relevant recording when needed.
@@ -164,7 +169,7 @@ For collection, connect the initiator by USB and power the reflector from its ba
 $env:GENIE_INITIATOR_PORT = "COM6"
 ```
 
-Use the actual port from Windows Device Manager. Run `python -B support/setup_genie.py --check` to verify installed prerequisites without modifying the project.
+Use the actual port from Windows Device Manager. Run `setup.cmd --check` to verify installed tools and the local Python dependencies without installing packages or changing project files. Run setup normally first if the local Python environment has not been created yet.
 
 ## Support and verification
 
