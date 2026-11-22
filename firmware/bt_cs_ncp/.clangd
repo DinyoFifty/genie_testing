@@ -1,0 +1,12 @@
+CompileFlags:
+  CompilationDatabase: cmake_gcc/build
+  # SLC copies GCC CMSIS headers. clangd also needs the SDK's Clang header.
+  Add: ["-IC:/Users/Lasho/.silabs/slt/installs/conan/p/simplf21f16a407b39/p/cmsis/Core/Include"]
+
+---
+If:
+  PathMatch: config/sl_mbedtls_config\.h
+Diagnostics:
+  # build_info.h includes this guarded configuration again. clangd reports a
+  # preamble recursion error when this header itself is the opened document.
+  Suppress: pp_including_mainfile_in_preamble

@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.codex/
+data/
+test-output/
+firmware/*/cmake_gcc/build/
+firmware/board_roles.json
+firmware/*/.vscode/
+firmware/*/.uceditor/
+firmware/*/.projectlinkstore
+firmware/*/.silabsExtContext
+firmware/*/vscode.conf
+*.zip
+*.zip.tmp

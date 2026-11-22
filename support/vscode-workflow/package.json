@@ -1,0 +1,51 @@
+{
+  "name": "genie-files-manager",
+  "displayName": "Genie Files",
+  "description": "Quick access to the Genie workflow and antenna offset headers.",
+  "version": "1.2.0",
+  "publisher": "local-genie",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": ["onView:genie.files.manager"],
+  "contributes": {
+    "views": {
+      "explorer": [
+        {
+          "id": "genie.files.manager",
+          "name": "Genie Files"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "genieFilesManager.reveal",
+        "title": "Reveal in Explorer"
+      },
+      {
+        "command": "genieFilesManager.delete",
+        "title": "Delete"
+      }
+    ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "genieFilesManager.reveal",
+          "when": "view == genie.files.manager && viewItem =~ /^(genieFile|genieFolder|genieLiveFile|genieLiveFolder)$/"
+        },
+        {
+          "command": "genieFilesManager.delete",
+          "when": "view == genie.files.manager && (viewItem == genieLiveFile || viewItem == genieLiveFolder)",
+          "group": "2_manage"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "genieFilesManager.delete",
+          "when": "false"
+        }
+      ]
+    }
+  }
+}

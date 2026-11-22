@@ -1,0 +1,192 @@
+"""Verify guided calibration selection against captured firmware metadata."""
+
+import copy
+import csv
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from linearreg import (
+    ANTENNA_PAIRS, USED_OFFSETS, calibration_baseline, distance_fit, find_runs,
+    recommended_offsets, regression_data,
+)
+
+
+class RegressionBatchTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.live = Path(self.temp.name)
+        projects = {}
+        for board, project in (("initiator", "bt_cs_ncp"), ("reflector", "bt_cs_soc_reflector_studio")):
+            projects[board] = {
+                "project": project,
+                "physical_antenna": 1,
+                "available_antennas": 1,
+                "aox_control_pins": 0,
+                "offset_config_type": "wireless",
+                "wireless_offsets_cm": [270, 67, 0, 0],
+                "wired_offsets_cm": [25, 25, 0, 0],
+            }
+        self.metadata = {
+            "batch_id": "ant1-baseline-270",
+            "attempt_id": "trial-1",
+            "firmware": {"mode": "isolated", "projects": projects, "fingerprint": "saved-baseline"},
+            "rotated_board": "reflector",
+            "fixed_yaw_deg": 0,
+            "setup": {},
+        }
+
+    def add_run(self, name, actual=1, measured=1.2, *, metadata=None, guided=True, **summary_changes):
+        folder = self.live / name
+        capture = folder / "capture"
+        capture.mkdir(parents=True)
+        summary = {
+            "actual_distance_m": actual,
+            "conditions": {"initiator_yaw_deg": 0, "reflector_yaw_deg": 0},
+            "stop_reason": "target_reached",
+            "target_reached": True,
+            "reports_saved": True,
+            "estimate_target": 100,
+            "finite_filtered_estimate_count": 100,
+        }
+        if guided:
+            summary["calibration"] = copy.deepcopy(self.metadata if metadata is None else metadata)
+        summary.update(summary_changes)
+        (capture / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        with (capture / "measurements.csv").open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(("initiatorId", "reflectorId", "distanceMain"))
+            writer.writerows(("initiator", "reflector", measured) for _ in range(100))
+        return folder
+
+    def test_saved_baseline_supplies_offsets_and_pair(self):
+        self.add_run("near", measured=1.2)
+        self.add_run("far", actual=2, measured=2.2)
+        runs = find_runs(self.live)
+        baseline = calibration_baseline(runs)
+        self.assertEqual(baseline["pair"], ANTENNA_PAIRS[0])
+        self.assertEqual(baseline["offsets"], ((270, 67, 0, 0), (270, 67, 0, 0)))
+        actual, measured, pairs, skipped = regression_data(runs)
+        self.assertFalse(skipped)
+        offsets, _ = recommended_offsets(baseline["offsets"], baseline["pair"], USED_OFFSETS[1],
+                                         actual, distance_fit(actual, measured), pairs)
+        self.assertEqual(offsets, ((280, 67, 0, 0), (280, 67, 0, 0)))
+
+    def normal_metadata(self):
+        metadata = copy.deepcopy(self.metadata)
+        metadata["firmware"]["mode"] = "normal"
+        for project in metadata["firmware"]["projects"].values():
+            project.update(physical_antenna=None, available_antennas=2, aox_control_pins=1)
+        return metadata
+
+    def test_normal_guided_runs_support_accuracy_regression(self):
+        metadata = self.normal_metadata()
+        for actual in (1, 2, 5, 10, 20):
+            for yaw in range(0, 360, 45):
+                self.add_run(f"{actual}m-{yaw}", actual, actual + 0.2, metadata=metadata,
+                             conditions={"initiator_yaw_deg": 0, "reflector_yaw_deg": yaw})
+        runs = find_runs(self.live)
+        baseline = calibration_baseline(runs)
+        self.assertEqual(baseline["mode"], "normal")
+        self.assertIsNone(baseline["pair"])
+        actual, measured, pairs, skipped = regression_data(runs)
+        self.assertEqual(actual, [1, 2, 5, 10, 20])
+        self.assertFalse(skipped)
+        fit = distance_fit(actual, measured)
+        self.assertAlmostEqual(fit.slope, 1)
+        self.assertAlmostEqual(fit.intercept, 0.2)
+        offsets, _ = recommended_offsets(baseline["offsets"], baseline["pair"], USED_OFFSETS[1], actual, fit, pairs)
+        self.assertIsNone(offsets)
+
+    def test_normal_and_isolated_guided_runs_use_separate_baselines(self):
+        self.add_run("isolated")
+        self.add_run("normal", metadata=self.normal_metadata())
+        with self.assertRaisesRegex(ValueError, "different antennas or firmware baselines"):
+            regression_data(find_runs(self.live))
+
+    def test_normal_metadata_requires_both_antennas_and_switching(self):
+        metadata = self.normal_metadata()
+        metadata["firmware"]["projects"]["reflector"]["aox_control_pins"] = 0
+        self.add_run("broken-normal", metadata=metadata)
+        with self.assertRaisesRegex(ValueError, "incomplete calibration baseline metadata"):
+            regression_data(find_runs(self.live))
+
+    def test_mixed_guided_and_legacy_runs_are_rejected(self):
+        self.add_run("guided")
+        self.add_run("legacy", guided=False)
+        with self.assertRaisesRegex(ValueError, "older folders separately"):
+            regression_data(find_runs(self.live))
+
+    def test_ant2_retains_each_boards_captured_offset(self):
+        ant2 = copy.deepcopy(self.metadata)
+        for project in ant2["firmware"]["projects"].values():
+            project["physical_antenna"] = 2
+        ant2["firmware"]["projects"]["reflector"]["wireless_offsets_cm"][1] = 70
+        self.add_run("ant2", metadata=ant2)
+        runs = find_runs(self.live)
+        baseline = calibration_baseline(runs)
+        actual, measured, pairs, _ = regression_data(runs)
+        self.assertEqual(baseline["pair"], ANTENNA_PAIRS[1])
+        offsets, _ = recommended_offsets(baseline["offsets"], baseline["pair"], USED_OFFSETS[1],
+                                         actual, distance_fit(actual, measured), pairs)
+        self.assertEqual(offsets, ((270, 77, 0, 0), (270, 80, 0, 0)))
+
+    def test_changed_offsets_are_rejected_even_with_identical_fingerprint(self):
+        self.add_run("before")
+        changed = copy.deepcopy(self.metadata)
+        changed["firmware"]["projects"]["reflector"]["wireless_offsets_cm"][0] = 300
+        self.add_run("after", metadata=changed)
+        with self.assertRaisesRegex(ValueError, "different antennas or firmware baselines"):
+            regression_data(find_runs(self.live))
+
+    def test_different_physical_antennas_are_rejected(self):
+        self.add_run("ant1")
+        changed = copy.deepcopy(self.metadata)
+        for project in changed["firmware"]["projects"].values():
+            project["physical_antenna"] = 2
+        self.add_run("ant2", metadata=changed)
+        with self.assertRaisesRegex(ValueError, "different antennas or firmware baselines"):
+            regression_data(find_runs(self.live))
+
+    def test_identical_firmware_in_multiple_batches_is_compatible(self):
+        self.add_run("one")
+        second = copy.deepcopy(self.metadata)
+        second["batch_id"] = "ant1-second-session"
+        second["attempt_id"] = "trial-2"
+        self.add_run("two", metadata=second)
+        baseline = calibration_baseline(find_runs(self.live))
+        self.assertEqual(baseline["batches"], ["ant1-baseline-270", "ant1-second-session"])
+
+    def test_incomplete_guided_attempts_are_skipped(self):
+        self.add_run("complete")
+        self.add_run("short", finite_filtered_estimate_count=84, target_reached=False)
+        self.add_run("interrupted", stop_reason="analyzer_interrupted")
+        self.add_run("missing-plots", reports_saved=False)
+        runs = find_runs(self.live)
+        self.assertEqual(sum(bool(run.issue) for run in runs), 3)
+        actual, _, _, skipped = regression_data(runs)
+        self.assertEqual(actual, [1])
+        self.assertEqual(len(skipped), 3)
+
+    def test_malformed_guided_baseline_is_rejected(self):
+        incomplete = copy.deepcopy(self.metadata)
+        del incomplete["firmware"]["projects"]["initiator"]["wireless_offsets_cm"]
+        self.add_run("broken", metadata=incomplete)
+        with self.assertRaisesRegex(ValueError, "incomplete calibration baseline metadata"):
+            regression_data(find_runs(self.live))
+
+    def test_legacy_only_selection_preserves_existing_behavior(self):
+        self.add_run("near", guided=False)
+        self.add_run("far", actual=2, measured=2.3, guided=False)
+        runs = find_runs(self.live)
+        self.assertIsNone(calibration_baseline(runs))
+        actual, measured, _, skipped = regression_data(runs)
+        self.assertEqual(actual, [1, 2])
+        self.assertEqual(measured, [1.2, 2.3])
+        self.assertFalse(skipped)
+
+
+if __name__ == "__main__":
+    unittest.main()
