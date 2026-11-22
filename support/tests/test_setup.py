@@ -13,6 +13,7 @@ import zipfile
 import flash
 from support import setup_genie
 from support.package_project import package_project
+from support.local_config import initialize_local_files
 
 
 class SetupTests(unittest.TestCase):
@@ -103,6 +104,24 @@ class SetupTests(unittest.TestCase):
                 setup_genie.install_extensions(Path("code.cmd"))
             self.assertEqual(execute.call_count, 1)
 
+    def test_builds_missing_sidebar_installer_from_shared_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            extension = root / "support/vscode-workflow"
+            extension.mkdir(parents=True)
+            (extension / "package.json").write_text(json.dumps({
+                "publisher": "local-genie", "name": "genie-files-manager", "version": "1.2.0",
+            }))
+            (extension / "extension.js").write_text("// shared sidebar source")
+            installed = "\n".join(item + "@1.0.0" for item in setup_genie.EXTENSIONS)
+            with patch.object(setup_genie, "ROOT", root), patch.object(
+                setup_genie.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, installed),
+            ) as execute:
+                setup_genie.install_extensions(Path("code.cmd"))
+            installer = extension / "genie-files-manager.vsix"
+            self.assertTrue(zipfile.is_zipfile(installer))
+            self.assertIn(str(installer), execute.call_args.args[0])
+
     def test_package_keeps_sdk_libraries_and_excludes_local_builds(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "source"
@@ -153,7 +172,9 @@ class SetupTests(unittest.TestCase):
             ):
                 (root / name).write_text(json.dumps(content), encoding="utf-8")
             tools = {"sdk": root / "SDK with spaces", "installs": root / "tools",
-                     "ARM_GCC_DIR": root / "tools/bin/arm-none-eabi-gcc.exe"}
+                     "ARM_GCC_DIR": root / "tools/bin/arm-none-eabi-gcc.exe",
+                     "POST_BUILD_EXE": root / "tools/commander.exe",
+                     "NINJA_EXE_PATH": root / "tools/ninja.exe"}
             setup_genie.configure_paths(root, tools)
             first = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
             setup_genie.configure_paths(root, tools)
@@ -163,6 +184,9 @@ class SetupTests(unittest.TestCase):
                 project = root / "firmware" / project_name
                 self.assertEqual((project / "config/offset.h").read_bytes(), b"user calibration 60 67\n")
                 self.assertIn(tools["sdk"].as_posix(), (project / ".clangd").read_text())
+                self.assertEqual((project / "cmake_gcc" / f"{project_name}.cmake").read_text(),
+                                 'set(SDK_PATH "old")\nset(PKG_PATH "old")\n')
+                self.assertIn(tools["sdk"].as_posix(), (project / "cmake_gcc/genie_local_paths.cmake").read_text())
 
     def test_build_discovers_tools_and_preserves_explicit_overrides(self):
         with tempfile.TemporaryDirectory() as directory:

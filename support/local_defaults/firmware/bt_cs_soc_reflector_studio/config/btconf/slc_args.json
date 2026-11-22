@@ -1,0 +1,6 @@
+{
+  "sdkRoot": "__RUN_SETUP__/",
+  "apackRoot": "__RUN_SETUP__/bluetooth_bgbuild",
+  "partOpn": "efr32mg24b210f1536im48",
+  "boards": "brd2606arevA04"
+}

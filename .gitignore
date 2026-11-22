@@ -2,7 +2,7 @@ __pycache__/
 *.py[cod]
 .venv/
 .codex/
-data/
+/data/
 test-output/
 firmware/*/cmake_gcc/build/
 firmware/board_roles.json
@@ -13,3 +13,22 @@ firmware/*/.silabsExtContext
 firmware/*/vscode.conf
 *.zip
 *.zip.tmp
+
+# Laptop and board settings are created from support/local_defaults by setup.
+/.vscode/
+/genie_testing.code-workspace
+/support/vscode-workflow/*.vsix
+/firmware/*/.clangd
+/firmware/*/cmake_gcc/autogen_toolchain.cmake
+/firmware/*/cmake_gcc/genie_local_paths.cmake
+/firmware/*/autogen/.slc_state/
+/firmware/*/config/btconf/slc_args.json
+/firmware/*/config/sl_rail_util_cs_antenna_offset_config.h
+/firmware/*/config/sl_rail_util_aox_config.h
+/firmware/*/config/cs_reflector_config.h
+/firmware/bt_cs_ncp/config/cs_initiator_config.h
+
+# Local operating-system metadata.
+.DS_Store
+Thumbs.db
+Desktop.ini

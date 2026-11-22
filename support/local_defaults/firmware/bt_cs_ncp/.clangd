@@ -1,7 +1,7 @@
 CompileFlags:
   CompilationDatabase: cmake_gcc/build
   # SLC copies GCC CMSIS headers. clangd also needs the SDK's Clang header.
-  Add: ["-IC:/Users/Lasho/.silabs/slt/installs/conan/p/simplf21f16a407b39/p/cmsis/Core/Include"]
+  Add: []
 
 ---
 If:

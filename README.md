@@ -39,6 +39,8 @@ Run [normal.py](normal.py) for testing with both antennas.
 
 Each script configures both firmware projects and preserves your saved physical antenna offsets.
 
+Mode, antenna offsets, board assignments, build paths, and editor settings stay local. Setup creates missing configuration files from [shared defaults](support/local_defaults/) and preserves existing ones. A new checkout starts in normal mode with zero wireless offsets; calibrate the board pair you will use.
+
 ### 2. Edit offsets when applying a calibration result
 
 The **Initiator offsets** and **Reflector offsets** groups in Genie Files open these headers.
@@ -132,7 +134,7 @@ Finalized source recordings are automatically recycled after their contents have
 
 Send `genie_testing.zip`. It contains the five main scripts, setup, the sidebar installer, helper code, and complete copies of both firmware projects. Each teammate extracts it and follows **First-time setup**.
 
-The ZIP starts with an empty [data/live/](data/live/). Your existing captures, Python environment, build caches, and remembered board assignments stay local. Source configuration headers carry the saved mode and offsets. Teammates should calibrate the boards they will use.
+The ZIP starts with an empty [data/live/](data/live/). Captures, trial progress, reports, logs, Python environments, build caches, board assignments, and local configuration files are excluded from Git and the ZIP. Teammates get the shared defaults and calibrate their own boards. Share selected trial folders separately when needed.
 
 To make a fresh ZIP after changing the code, run this command from the project terminal.
 

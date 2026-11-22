@@ -4,8 +4,12 @@ import argparse
 import json
 import os
 from pathlib import Path
-import re
 import zipfile
+
+if __package__ in (None, ""):
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from support.local_config import local_paths
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -42,14 +46,15 @@ def build_extension(root):
 def package_project(root, destination):
     """Walk into firmware junctions and store each file's actual contents."""
     build_extension(root)
+    private = local_paths(root)
     temporary = destination.with_suffix(".zip.tmp")
     try:
         with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
             for directory, folders, files in os.walk(root, followlinks=True):
                 relative = Path(directory).relative_to(root)
-                excluded = {".venv", ".codex", ".git", "__pycache__", ".uceditor"}
+                excluded = {".venv", ".codex", ".git", "__pycache__", ".uceditor", ".slc_state"}
                 if relative == Path("."):
-                    excluded.update({"data", "test-output"})
+                    excluded.update({"data", "test-output", ".vscode"})
                 if relative.parts[:1] == ("firmware",):
                     excluded.add(".vscode")
                     if len(relative.parts) == 3 and relative.parts[2] == "cmake_gcc":
@@ -57,27 +62,15 @@ def package_project(root, destination):
                 folders[:] = sorted(name for name in folders if name not in excluded)
                 for name in sorted(files):
                     path = Path(directory) / name
-                    if name.endswith((".pyc", ".pyo", ".crswap")) or name in {
-                        "board_roles.json", ".projectlinkstore", ".silabsExtContext", "vscode.conf",
+                    if path.relative_to(root) in private or (
+                        relative == Path(".") and name.endswith(".code-workspace")
+                    ) or name.endswith((".pyc", ".pyo", ".crswap")) or name in {
+                        "board_roles.json", "genie_local_paths.cmake", ".projectlinkstore", ".silabsExtContext", "vscode.conf",
+                        ".DS_Store", "Thumbs.db", "Desktop.ini",
                     } or path.resolve() in {destination.resolve(), temporary.resolve()}:
                         continue
                     target = "genie_testing/" + path.relative_to(root).as_posix()
-                    content = path.read_bytes()
-                    # Setup supplies the recipient's SDK and compiler installation paths.
-                    if relative.parts[:1] == ("firmware",) and path.suffix == ".cmake":
-                        text = content.decode("utf-8")
-                        text = re.sub(r'(?m)^set\((SDK_PATH|PKG_PATH) "[^"]*"\)',
-                                      r'set(\1 "__RUN_SETUP__")', text)
-                        content = text.encode("utf-8")
-                    elif name == ".clangd":
-                        text = content.decode("utf-8")
-                        content = re.sub(r"(?m)^  Add:.*$", '  Add: ["-I__RUN_SETUP__/cmsis/Core/Include"]', text).encode("utf-8")
-                    elif (relative == Path(".vscode") and name in {"settings.json", "c_cpp_properties.json"}) or name.endswith(".code-workspace"):
-                        text = content.decode("utf-8")
-                        text = re.sub(r'C:/Users/[^"\n]+/bin/arm-none-eabi-gcc.exe',
-                                      "arm-none-eabi-gcc", text)
-                        content = text.encode("utf-8")
-                    archive.writestr(target, content)
+                    archive.writestr(target, path.read_bytes())
             archive.writestr("genie_testing/data/live/", b"")
         temporary.replace(destination)
     except BaseException:

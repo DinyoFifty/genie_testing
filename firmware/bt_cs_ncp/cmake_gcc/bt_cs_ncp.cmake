@@ -2,9 +2,10 @@
 # Automatically-generated file. Do not edit!                       #
 ####################################################################
 
-set(SDK_PATH "C:/Users/Lasho/.silabs/slt/installs/conan/p/simplf21f16a407b39/p")
+set(SDK_PATH "__RUN_SETUP__")
 set(COPIED_SDK_PATH "simplicity_sdk_2026.6.2")
-set(PKG_PATH "C:/Users/Lasho/.silabs/slt/installs")
+set(PKG_PATH "__RUN_SETUP__")
+include("${CMAKE_CURRENT_LIST_DIR}/genie_local_paths.cmake" OPTIONAL)
 
 add_library(slc OBJECT
     "../${COPIED_SDK_PATH}/bgapi_protocol/bgapi_trace/src/sli_bgapi_trace.c"

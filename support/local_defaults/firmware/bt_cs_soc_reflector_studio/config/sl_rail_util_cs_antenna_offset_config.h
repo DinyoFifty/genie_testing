@@ -41,8 +41,8 @@ extern "C" {
 #define GENIE_TEST_ANTENNA                               1
 
 // Keep calibration values associated with each physical antenna.
-#define GENIE_ANT1_WIRELESS_OFFSET_CM                    60
-#define GENIE_ANT2_WIRELESS_OFFSET_CM                    60
+#define GENIE_ANT1_WIRELESS_OFFSET_CM                    0
+#define GENIE_ANT2_WIRELESS_OFFSET_CM                    0
 #define GENIE_ANT1_WIRED_OFFSET_CM                       25
 #define GENIE_ANT2_WIRED_OFFSET_CM                       25
 
