@@ -33,17 +33,27 @@ async function activate(context) {
 
     async function prepareLayout() {
         // Use VS Code's view commands so its own layout persistence stays in charge.
-        await vscode.commands.executeCommand("workbench.view.extension.genieFiles");
-        await vscode.commands.executeCommand("genie.files.manager.open", { preserveFocus: true });
         const available = await vscode.commands.getCommands(true);
+        if (available.includes("vscode.moveViews")) {
+            await vscode.commands.executeCommand("vscode.moveViews", {
+                viewIds: ["genie.files.manager"], destinationId: "workbench.view.explorer",
+            });
+        }
+        await vscode.commands.executeCommand("workbench.view.explorer");
         for (const view of ["outline", "timeline"]) {
             if (available.includes(`${view}.removeView`)) {
                 await vscode.commands.executeCommand(`${view}.removeView`);
             }
         }
+        await vscode.commands.executeCommand("workbench.files.action.collapseExplorerFolders");
+        await vscode.commands.executeCommand("genie.files.manager.focus");
+        // First setup/explicit restore only; leave later user resizing and ordering alone.
+        for (let position = 0; position < 8; position++) {
+            await vscode.commands.executeCommand("views.moveViewUp");
+        }
         await vscode.workspace.getConfiguration("explorer", workspace.uri).update(
             "autoReveal", false, vscode.ConfigurationTarget.Workspace);
-        await context.workspaceState.update("testingLayoutVersion", 2);
+        await context.workspaceState.update("testingLayoutVersion", 3);
     }
 
     function isLiveEntry(filePath, base = liveRoot) {
@@ -310,7 +320,7 @@ async function activate(context) {
     // Opening our own view during activation would wait on this activation promise.
     const startup = setTimeout(async () => {
         try {
-            if (context.workspaceState.get("testingLayoutVersion") !== 2) {
+            if (context.workspaceState.get("testingLayoutVersion") !== 3) {
                 await prepareLayout();
             } else {
                 await vscode.commands.executeCommand("genie.files.manager.open", { preserveFocus: true });

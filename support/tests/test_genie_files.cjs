@@ -7,9 +7,9 @@ const vm = require("node:vm");
 
 async function main() {
     const manifest = JSON.parse(await fs.readFile(path.join(__dirname, "../vscode-workflow/package.json"), "utf8"));
-    assert(!manifest.contributes.views.explorer, "Keep Genie Files out of the resizable Explorer stack");
-    assert.equal(manifest.contributes.views.genieFiles[0].id, "genie.files.manager");
-    assert.equal(manifest.contributes.viewsContainers.activitybar[0].id, "genieFiles");
+    assert.equal(manifest.contributes.views.explorer[0].id, "genie.files.manager");
+    assert.equal(manifest.contributes.views.explorer[0].visibility, "visible");
+    assert(!manifest.contributes.viewsContainers, "Shortcuts belong in the standard Explorer");
     assert(manifest.activationEvents.includes("workspaceContains:setup.cmd"));
     assert(!manifest.activationEvents.includes("onStartupFinished"), "The file list must not wait for delayed startup");
     assert(!manifest.activationEvents.includes("*"), "Only activate in a matching project or when its view is requested");
@@ -91,7 +91,7 @@ async function main() {
         },
         commands: {
             registerCommand(name, callback) { commands.set(name, callback); return disposable; },
-            async getCommands() { return viewIds.map(id => `${id}.removeView`); },
+            async getCommands() { return ["vscode.moveViews", ...viewIds.map(id => `${id}.removeView`)]; },
             async executeCommand(name, ...args) {
                 executed.push([name, ...args]);
                 if (name === "genie.files.manager.open") {
@@ -159,10 +159,14 @@ async function main() {
         assert.equal(directoryReads, 0, "The initial file list must not need folder enumeration");
         assert(!visibleViews.includes("outline") && !visibleViews.includes("timeline"));
         assert(visibleViews.includes("workbench.explorer.fileView"), "Keep the regular Explorer available");
-        assert(executed.some(([name]) => name === "workbench.view.extension.genieFiles"));
-        assert.equal(collapsed, false);
+        assert(executed.some(([name]) => name === "workbench.view.explorer"));
+        const relocation = executed.find(([name]) => name === "vscode.moveViews");
+        assert.equal(relocation[1].destinationId, "workbench.view.explorer");
+        assert.deepEqual(Array.from(relocation[1].viewIds), ["genie.files.manager"]);
+        assert.equal(viewOrder.filter(id => visibleViews.includes(id))[0], "genie.files.manager");
+        assert.equal(collapsed, true);
         assert.equal(autoReveal, false);
-        assert.equal(savedState.get("testingLayoutVersion"), 2);
+        assert.equal(savedState.get("testingLayoutVersion"), 3);
         assert.equal(executed.filter(([name]) => name === "workbench.action.reloadWindow").length, 0);
 
         // Opening the workspace again shows Genie Files without undoing a teammate's changes.
@@ -177,9 +181,9 @@ async function main() {
             || name === "workbench.action.reloadWindow"));
         await commands.get("genieFilesManager.prepareLayout")();
         assert(!visibleViews.includes("outline"));
-        savedState.set("testingLayoutVersion", 1);
+        savedState.set("testingLayoutVersion", 2);
         await activate();
-        assert.equal(savedState.get("testingLayoutVersion"), 2);
+        assert.equal(savedState.get("testingLayoutVersion"), 3);
         assert(visibleViews.includes("workbench.explorer.fileView"));
         const data = (await provider.getChildren()).find(item => item.label === "data");
         const master = (await provider.getChildren()).find(item => item.label === "Master results.xlsx");
@@ -283,12 +287,12 @@ async function main() {
         assert.equal(deleted.length, 4);
         // A failed arrangement remains retryable and does not prevent the file tree from registering.
         savedState.clear();
-        failCommand = "workbench.view.extension.genieFiles";
+        failCommand = "workbench.view.explorer";
         await activate();
         assert.equal(savedState.get("testingLayoutVersion"), undefined);
         failCommand = undefined;
         await commands.get("genieFilesManager.prepareLayout")();
-        assert.equal(savedState.get("testingLayoutVersion"), 2);
+        assert.equal(savedState.get("testingLayoutVersion"), 3);
 
         // Installing the extension does not rearrange an unrelated project.
         vscode.workspace.workspaceFolders = [{ uri: { fsPath: path.join(root, "unrelated") } }];
