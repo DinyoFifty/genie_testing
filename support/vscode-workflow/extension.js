@@ -38,6 +38,14 @@ async function activate(context) {
             await vscode.commands.executeCommand("vscode.moveViews", {
                 viewIds: ["genie.files.manager"], destinationId: "workbench.view.explorer",
             });
+            // The built-in Folders view cannot be hidden. Keep it available as an
+            // optional panel, so Explorer has one tree and one scrollbar.
+            await vscode.commands.executeCommand("vscode.moveViews", {
+                viewIds: ["workbench.explorer.fileView", "workbench.explorer.openEditorsView"],
+                destinationId: "workbench.view.extension.genieProjectExplorer",
+            });
+            // Moving a view opens its destination; keep that optional browser closed.
+            await vscode.commands.executeCommand("workbench.action.closePanel");
         }
         await vscode.commands.executeCommand("workbench.view.explorer");
         for (const view of ["outline", "timeline"]) {
@@ -45,15 +53,10 @@ async function activate(context) {
                 await vscode.commands.executeCommand(`${view}.removeView`);
             }
         }
-        await vscode.commands.executeCommand("workbench.files.action.collapseExplorerFolders");
         await vscode.commands.executeCommand("genie.files.manager.focus");
-        // First setup/explicit restore only; leave later user resizing and ordering alone.
-        for (let position = 0; position < 8; position++) {
-            await vscode.commands.executeCommand("views.moveViewUp");
-        }
         await vscode.workspace.getConfiguration("explorer", workspace.uri).update(
             "autoReveal", false, vscode.ConfigurationTarget.Workspace);
-        await context.workspaceState.update("testingLayoutVersion", 3);
+        await context.workspaceState.update("testingLayoutVersion", 4);
     }
 
     function isLiveEntry(filePath, base = liveRoot) {
@@ -101,6 +104,7 @@ async function activate(context) {
     function file(relativePath, label = path.basename(relativePath), branch = "testing") {
         const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
         item.id = `${branch}:file:${path.normalize(relativePath)}`;
+        item.branch = branch;
         item.resourceUri = vscode.Uri.file(path.join(root, relativePath));
         item.tooltip = item.resourceUri.fsPath;
         if (relativePath === "results.py") item.tooltip = "Review batches, test setup, measurement evidence, and the master workbook.";
@@ -134,6 +138,11 @@ async function activate(context) {
     const provider = {
         onDidChangeTreeData: changes.event,
         getTreeItem: item => item,
+        getParent(item) {
+            if (item.branch !== "project" || item.relativePath === ".") return undefined;
+            const parent = path.dirname(path.relative(root, item.resourceUri.fsPath));
+            return folder(parent, parent === "." ? "Project Files" : path.basename(parent), "project");
+        },
         async getChildren(item) {
             if (item?.offsetPath) return [file(item.offsetPath, offsetHeader, item.id)];
             if (item?.relativePath === "data" && item.branch === "testing") {
@@ -207,7 +216,7 @@ async function activate(context) {
                 ...scripts.map(name => file(name)),
                 master,
                 folder("data"),
-                folder(".", `${path.basename(root)} (project files)`, "project"),
+                folder(".", "Project Files", "project"),
             ];
         },
     };
@@ -222,17 +231,30 @@ async function activate(context) {
             changes.fire();
         }, 150);
     }
+    const tree = vscode.window.createTreeView("genie.files.manager", {
+        treeDataProvider: provider,
+        canSelectMany: true,
+    });
     context.subscriptions.push(
         changes,
         liveChanges,
-        vscode.window.createTreeView("genie.files.manager", {
-            treeDataProvider: provider,
-            canSelectMany: true,
-        }),
+        tree,
         vscode.commands.registerCommand("genieFilesManager.prepareLayout", prepareLayout),
         vscode.commands.registerCommand("genieFilesManager.openResults", openResults),
-        vscode.commands.registerCommand("genieFilesManager.reveal", item =>
-            vscode.commands.executeCommand("revealInExplorer", item.resourceUri)),
+        vscode.commands.registerCommand("genieFilesManager.reveal", async item => {
+            if (!item?.resourceUri) return;
+            const relative = path.relative(root, item.resourceUri.fsPath);
+            if (relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) return;
+            try {
+                const info = await fs.stat(item.resourceUri.fsPath);
+                const target = info.isDirectory()
+                    ? folder(relative || ".", relative ? path.basename(relative) : "Project Files", "project")
+                    : file(relative, path.basename(relative), "project");
+                await tree.reveal(target, { select: true, focus: true, expand: true });
+            } catch (error) {
+                await vscode.window.showErrorMessage(`Could not reveal the file in Project Files. ${error.message}`);
+            }
+        }),
         vscode.commands.registerCommand("genieFilesManager.delete", async (item, selectedItems = [item]) => {
             if (!selectedItems.length) return;
             const uris = selectedItems.map(selected => selected?.resourceUri);
@@ -320,7 +342,7 @@ async function activate(context) {
     // Opening our own view during activation would wait on this activation promise.
     const startup = setTimeout(async () => {
         try {
-            if (context.workspaceState.get("testingLayoutVersion") !== 3) {
+            if (context.workspaceState.get("testingLayoutVersion") !== 4) {
                 await prepareLayout();
             } else {
                 await vscode.commands.executeCommand("genie.files.manager.open", { preserveFocus: true });

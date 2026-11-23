@@ -9,7 +9,8 @@ async function main() {
     const manifest = JSON.parse(await fs.readFile(path.join(__dirname, "../vscode-workflow/package.json"), "utf8"));
     assert.equal(manifest.contributes.views.explorer[0].id, "genie.files.manager");
     assert.equal(manifest.contributes.views.explorer[0].visibility, "visible");
-    assert(!manifest.contributes.viewsContainers, "Shortcuts belong in the standard Explorer");
+    assert.equal(manifest.contributes.viewsContainers.panel[0].id, "genieProjectExplorer");
+    assert(!manifest.contributes.viewsContainers.activitybar, "Shortcuts belong in the standard Explorer");
     assert(manifest.activationEvents.includes("workspaceContains:setup.cmd"));
     assert(!manifest.activationEvents.includes("onStartupFinished"), "The file list must not wait for delayed startup");
     assert(!manifest.activationEvents.includes("*"), "Only activate in a matching project or when its view is requested");
@@ -22,10 +23,12 @@ async function main() {
     const errors = [];
     const deleted = [];
     const executed = [];
+    const revealed = [];
     const savedState = new Map();
     const viewIds = ["workbench.explorer.openEditorsView", "workbench.explorer.fileView", "outline", "timeline",
         "fixture.other", "genie.files.manager"];
     let visibleViews = [...viewIds];
+    const containers = new Map(viewIds.map(id => [id, "workbench.view.explorer"]));
     const viewOrder = [...viewIds];
     let focusedView;
     let collapsed = false;
@@ -85,7 +88,11 @@ async function main() {
             },
         },
         window: {
-            createTreeView(name, options) { provider = options.treeDataProvider; return disposable; },
+            createTreeView(name, options) {
+                assert.equal(name, "genie.files.manager");
+                provider = options.treeDataProvider;
+                return { ...disposable, async reveal(item, options) { revealed.push({ item, options }); } };
+            },
             async showErrorMessage(message) { errors.push(message); },
             async showWarningMessage() { return "Delete"; },
         },
@@ -94,11 +101,13 @@ async function main() {
             async getCommands() { return ["vscode.moveViews", ...viewIds.map(id => `${id}.removeView`)]; },
             async executeCommand(name, ...args) {
                 executed.push([name, ...args]);
-                if (name === "genie.files.manager.open") {
+                if (name === "genie.files.manager.open" || name === "genie.files.manager.focus") {
                     assert(activationReturned, "Opening our own view must wait until activation has returned");
                 }
                 if (name === failCommand) throw new Error("fixture command failure");
-                if (name.endsWith(".removeView")) {
+                if (name === "vscode.moveViews") {
+                    for (const id of args[0].viewIds) containers.set(id, args[0].destinationId);
+                } else if (name.endsWith(".removeView")) {
                     visibleViews = visibleViews.filter(id => id !== name.slice(0, -".removeView".length));
                 } else if (name === "genie.files.manager.focus") {
                     focusedView = "genie.files.manager";
@@ -163,10 +172,15 @@ async function main() {
         const relocation = executed.find(([name]) => name === "vscode.moveViews");
         assert.equal(relocation[1].destinationId, "workbench.view.explorer");
         assert.deepEqual(Array.from(relocation[1].viewIds), ["genie.files.manager"]);
-        assert.equal(viewOrder.filter(id => visibleViews.includes(id))[0], "genie.files.manager");
-        assert.equal(collapsed, true);
+        assert.equal(containers.get("genie.files.manager"), "workbench.view.explorer");
+        for (const id of ["workbench.explorer.fileView", "workbench.explorer.openEditorsView"]) {
+            assert.equal(containers.get(id), "workbench.view.extension.genieProjectExplorer",
+                "The duplicate native workspace pane must not share the shortcut sidebar");
+        }
+        assert(executed.some(([name]) => name === "workbench.action.closePanel"));
+        assert.equal(collapsed, false);
         assert.equal(autoReveal, false);
-        assert.equal(savedState.get("testingLayoutVersion"), 3);
+        assert.equal(savedState.get("testingLayoutVersion"), 4);
         assert.equal(executed.filter(([name]) => name === "workbench.action.reloadWindow").length, 0);
 
         // Opening the workspace again shows Genie Files without undoing a teammate's changes.
@@ -181,9 +195,9 @@ async function main() {
             || name === "workbench.action.reloadWindow"));
         await commands.get("genieFilesManager.prepareLayout")();
         assert(!visibleViews.includes("outline"));
-        savedState.set("testingLayoutVersion", 2);
+        savedState.set("testingLayoutVersion", 3);
         await activate();
-        assert.equal(savedState.get("testingLayoutVersion"), 3);
+        assert.equal(savedState.get("testingLayoutVersion"), 4);
         assert(visibleViews.includes("workbench.explorer.fileView"));
         const data = (await provider.getChildren()).find(item => item.label === "data");
         const master = (await provider.getChildren()).find(item => item.label === "Master results.xlsx");
@@ -191,13 +205,19 @@ async function main() {
         assert(commands.has("genieFilesManager.openResults"));
         assert((await provider.getChildren()).some(item => item.label === "results.py"));
         const project = (await provider.getChildren()).find(item => item.relativePath === ".");
-        assert(project.label.endsWith(" (project files)"));
+        assert.equal(project.label, "Project Files");
         const projectChildren = await provider.getChildren(project);
         const projectAnalyzer = projectChildren.find(item => item.label === "analyzer.py");
         const quickAnalyzer = (await provider.getChildren()).find(item => item.label === "analyzer.py");
         assert.equal(projectAnalyzer.resourceUri.fsPath, quickAnalyzer.resourceUri.fsPath);
         assert.notEqual(projectAnalyzer.id, quickAnalyzer.id, "The two shortcuts must have distinct tree identities");
         assert.equal((await provider.getChildren()).find(item => item.label === "analyzer.py").id, quickAnalyzer.id);
+        await commands.get("genieFilesManager.reveal")(quickAnalyzer);
+        assert.equal(revealed.at(-1).item.id, projectAnalyzer.id);
+        assert.equal(provider.getParent(revealed.at(-1).item).id, project.id);
+        assert.equal(provider.getParent(project), undefined);
+        assert(revealed.at(-1).options.select && revealed.at(-1).options.focus && revealed.at(-1).options.expand);
+        assert(!executed.some(([name]) => name === "revealInExplorer"), "Reveal must stay in our project tree");
         const identities = new Set();
         async function checkIdentities(parent) {
             for (const child of await provider.getChildren(parent)) {
@@ -240,6 +260,13 @@ async function main() {
         const stateFiles = await provider.getChildren(conditionContents.find(item => item.label === "capture"));
         const progressItem = stateFiles.find(item => item.label === "progress.json");
         assert.equal(progressItem.contextValue, "genieFile");
+        await commands.get("genieFilesManager.reveal")(progressItem);
+        let parent = revealed.at(-1).item;
+        const parents = [];
+        while (parent = provider.getParent(parent)) parents.push(parent);
+        assert.equal(parents[0].relativePath, path.relative(root, path.join(trial, "capture")));
+        assert.equal(parents.at(-1).id, project.id, "Nested captures must reveal under Project Files too");
+        assert(!executed.some(([name]) => name === "revealInExplorer"));
 
         // Legacy single trials retain a visible time after their dated folder name changes.
         const single = liveChildren[1];
@@ -292,7 +319,7 @@ async function main() {
         assert.equal(savedState.get("testingLayoutVersion"), undefined);
         failCommand = undefined;
         await commands.get("genieFilesManager.prepareLayout")();
-        assert.equal(savedState.get("testingLayoutVersion"), 3);
+        assert.equal(savedState.get("testingLayoutVersion"), 4);
 
         // Installing the extension does not rearrange an unrelated project.
         vscode.workspace.workspaceFolders = [{ uri: { fsPath: path.join(root, "unrelated") } }];
