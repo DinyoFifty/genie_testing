@@ -1,0 +1,21 @@
+{
+  "distances_m": [1, 2, 5, 10, 20],
+  "yaw_degrees": [0, 45, 90, 135, 180, 225, 270, 315],
+  "estimates_per_trial": 100,
+  "max_capture_seconds": 120,
+  "max_result_messages_per_trial": 1000,
+  "targets_confirmed_with_sponsor": false,
+  "provisional_targets": {
+    "valid_estimate_fraction": 0.95,
+    "mean_range_error_m": 2.0,
+    "end_to_end_latency_ms": 20.0,
+    "mean_reflector_current_ma": 2.3
+  },
+  "target_notes": "Confirm with Genie before acceptance testing. Define mean range error (signed vs absolute), latency endpoints, valid-result criteria and current averaging window. These are provisional targets, not automatic pass/fail rules.",
+  "source": "Team 5 Problem Identification, Needs Assessment, and Requirements Definition, Table IV; Critical Design Review, Next Steps.",
+  "profiles": {
+    "baseline": {"label": "Latency baseline", "algoMode": 2, "chMapPreset": 2, "scheduling": 0},
+    "accuracy": {"label": "Accuracy comparison", "algoMode": 0, "chMapPreset": 2, "scheduling": 0},
+    "energy": {"label": "Energy scheduling comparison", "algoMode": 2, "chMapPreset": 2, "scheduling": 1}
+  }
+}

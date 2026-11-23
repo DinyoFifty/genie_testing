@@ -21,6 +21,11 @@ const availableAntennas = Math.min(...["bt_cs_ncp", "bt_cs_soc_reflector_studio"
 }));
 const pbrAntennas = sessionMode ? availableAntennas : Number(process.env.GENIE_PBR_ANTENNAS || availableAntennas);
 const initiatorPort = process.env.GENIE_INITIATOR_PORT;
+const protocol = JSON.parse(fs.readFileSync(path.join(__dirname, "test_protocol.json"), "utf8"));
+const profileFile = path.join(__dirname, "..", "data", "settings", "radio.json");
+const profileName = fs.existsSync(profileFile) ? JSON.parse(fs.readFileSync(profileFile, "utf8")).profile : "baseline";
+if (!Object.hasOwn(protocol.profiles, profileName)) throw new Error("Unknown Analyzer profile. Select one in results.py.");
+const radioProfile = { name: profileName, ...protocol.profiles[profileName] };
 if (![1, 2].includes(pbrAntennas)) throw new Error("GENIE_PBR_ANTENNAS must be 1 or 2");
 if (pbrAntennas > availableAntennas) throw new Error("PBR requests more antennas than the firmware configuration provides");
 let stopRequested = false;
@@ -104,6 +109,7 @@ async function openDebugger(analyzer) {
     const pending = new Map();
     let nextId = 0;
     let onData = () => {};
+    let onTelemetry = () => {};
     let failure;
     socket.addEventListener("message", event => {
         const message = JSON.parse(event.data);
@@ -117,6 +123,11 @@ async function openDebugger(analyzer) {
             } catch (error) {
                 failure = error;
             }
+            return;
+        }
+        if (message.method === "Runtime.bindingCalled" && message.params.name === "genieTelemetry") {
+            try { onTelemetry(JSON.parse(message.params.payload)); }
+            catch (error) { failure = error; }
             return;
         }
         const reply = pending.get(message.id);
@@ -161,9 +172,40 @@ async function openDebugger(analyzer) {
             return result.result.value;
         },
         receive(callback) { onData = callback; },
+        telemetry(callback) { onTelemetry = callback; },
         check() { if (failure) throw failure; },
         close() { socket.close(); },
     };
+}
+
+// Analyzer 1.2.2 exposes these worker callbacks and config fields. Keep the
+// originals, record diagnostics separately, and never infer an RF attempt ID.
+function observeAnalyzer(profile) {
+    const store = document.getElementById("q-app")?.__vue_app__?.config.globalProperties.$pinia?._s.get("localSession");
+    const worker = store?.worker?.__v_raw || store?.worker;
+    if (!worker) throw new Error("Analyzer worker is unavailable; no settings were guessed.");
+    if (window.genieObserver) return true;
+    const observation = { active: false, configuration: null };
+    const send = event => window.genieTelemetry(JSON.stringify({ ...event,
+        observed_at_utc: new Date().toISOString(), host_monotonic_ms: performance.now() }));
+    const originalState = worker.onStateMessage;
+    worker.onStateMessage = function (state) {
+        if (observation.active) send({ kind: "state", state });
+        return originalState.apply(worker, arguments);
+    };
+    const originalStart = worker.startMeasurement;
+    worker.startMeasurement = async function (reflector, config) {
+        const requested = { ...config, algoMode: profile.algoMode,
+            chMapPreset: profile.chMapPreset, scheduling: profile.scheduling };
+        const accepted = await originalStart.call(worker, reflector, requested);
+        observation.configuration = { profile: profile.name, requested, start_accepted: accepted,
+            limitation: "Host-requested configuration; TX power and flashed firmware are not read back." };
+        if (observation.active) send({ kind: "configuration", configuration: observation.configuration });
+        return accepted;
+    };
+    observation.send = send;
+    window.genieObserver = observation;
+    return true;
 }
 
 async function connectBoards(debuggerClient) {
@@ -217,6 +259,9 @@ async function connectBoards(debuggerClient) {
         return false;
     }, initiator), 18000);
 
+    await debuggerClient.evaluate(observeAnalyzer, radioProfile);
+    console.error(`Analyzer profile: ${radioProfile.label}`);
+
     const reflector = await waitFor("a ranging reflector", () => debuggerClient.evaluate(antennas => {
         const dialog = document.querySelector('[data-cy="ml-reflector-connection-dialog"]');
         if (dialog) {
@@ -264,9 +309,13 @@ async function record(debuggerClient, control, output = recording, maximum = nul
     let started = false;
     let lastReading = 0;
     let estimates = 0;
+    let resultMessages = 0;
     let pending = Buffer.alloc(0);
     let stopReason = "stopped";
     let failure;
+    const telemetryPath = output + ".telemetry.jsonl";
+    const telemetryFile = fs.openSync(telemetryPath, "wx");
+    debuggerClient.telemetry?.(event => fs.writeSync(telemetryFile, JSON.stringify(event) + "\n"));
     const shouldStop = () => stopRequested || (sessionMode && captureStopRequested);
     try {
         debuggerClient.receive(data => {
@@ -288,6 +337,7 @@ async function record(debuggerClient, control, output = recording, maximum = nul
                     if (!line) continue;
                     const result = JSON.parse(line);
                     if (!result?.initiatorId || !result?.reflectorId) continue;
+                    resultMessages += 1;
                     lastReading = Date.now();
                     if (typeof result.distanceMain === "number" && Number.isFinite(result.distanceMain)) estimates += 1;
                 }
@@ -298,6 +348,10 @@ async function record(debuggerClient, control, output = recording, maximum = nul
                 .find(control => control.dataset.cy === key);
             if (button?.querySelector(".mdi-stop")) throw new Error("The reflector is already recording");
             if (!button?.querySelector(".mdi-record")) return false;
+            if (window.genieObserver) {
+                window.genieObserver.active = true;
+                window.genieObserver.send({ kind: "configuration", configuration: window.genieObserver.configuration });
+            }
             const originalPicker = window.showSaveFilePicker;
             // Supply an output stream for this Record click. Restore the normal
             // picker immediately. Analyzer still produces the original JSONL.
@@ -319,21 +373,32 @@ async function record(debuggerClient, control, output = recording, maximum = nul
             return true;
         }, control), 6000);
         started = true;
+        const captureStarted = Date.now();
+        file ??= fs.openSync(swap, "wx");
+        if (sessionMode) emit({ event: "recording", path: output });
+        else console.log("READY");
 
         const firstReadingDeadline = Date.now() + 30000;
         while (!lastReading && !shouldStop() && !closed) {
             debuggerClient.check();
-            if (Date.now() >= firstReadingDeadline) throw new Error("Timed out waiting for the first recorded reading");
+            if (Date.now() >= firstReadingDeadline) {
+                stopReason = "no_readings";
+                break;
+            }
             await delay(150);
         }
-        if (lastReading) {
-            if (sessionMode) emit({ event: "recording", path: output });
-            else console.log("READY");
-        }
-        while (!shouldStop() && !closed) {
+        while (lastReading && !shouldStop() && !closed) {
             debuggerClient.check();
             if (maximum !== null && estimates >= maximum) {
                 stopReason = "target_reached";
+                break;
+            }
+            if (resultMessages >= protocol.max_result_messages_per_trial) {
+                stopReason = "result_limit";
+                break;
+            }
+            if (Date.now() - captureStarted >= protocol.max_capture_seconds * 1000) {
+                stopReason = "capture_timeout";
                 break;
             }
             if (Date.now() - lastReading >= noReadingTimeout) {
@@ -361,6 +426,14 @@ async function record(debuggerClient, control, output = recording, maximum = nul
             }
         }
         debuggerClient.receive(() => {});
+        try {
+            await debuggerClient.evaluate(() => {
+                if (window.genieObserver) window.genieObserver.active = false;
+                return true;
+            });
+        } catch { /* Preserve any interrupted capture and its received evidence. */ }
+        debuggerClient.telemetry?.(() => {});
+        fs.closeSync(telemetryFile);
         if (file !== undefined) {
             try { fs.fsyncSync(file); } finally { fs.closeSync(file); }
         }
@@ -406,8 +479,9 @@ async function main() {
         debuggerClient = await openDebugger(analyzer);
         await waitFor("the Analyzer toolbar", () => debuggerClient.evaluate(() =>
             !!document.querySelector('[data-cy="bglog-btn"]')), 10000);
-        const reflector = await connectBoards(debuggerClient);
         await debuggerClient.request("Runtime.addBinding", { name: "genieRecordChunk" });
+        await debuggerClient.request("Runtime.addBinding", { name: "genieTelemetry" });
+        const reflector = await connectBoards(debuggerClient);
         if (sessionMode) await recordSession(debuggerClient, reflector);
         else await record(debuggerClient, reflector);
     } catch (error) {

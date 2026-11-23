@@ -252,6 +252,24 @@ class LiveTests(unittest.TestCase):
         self.assertNotIn("successful_measurement_pct", summary)
         self.assertIsNone(summary["firmware"])
 
+    def test_empty_automatic_capture_retains_telemetry_and_unknown_reliability(self):
+        self.path.write_bytes(b"")
+        telemetry = self.path.with_name(self.path.name + ".telemetry.jsonl")
+        telemetry.write_text(json.dumps({"kind": "state", "state": {"message": "no radio results"}}) + "\n", encoding="utf-8")
+        recording = Mock(path=self.path)
+        recording.running.return_value = False
+        recording.stop.return_value = "no_readings"
+        with patch("support.genie_live.write_measurements_xlsx", return_value=None):
+            session = run_live(out=self.root / "live", plot=False, recording=recording, max_estimates=100)
+        summary = json.loads((session / "capture/summary.json").read_text())
+        self.assertEqual(summary["records"], 0)
+        self.assertEqual(summary["observed_without_finite_filtered_distance_count"], 0)
+        self.assertEqual(summary["stop_reason"], "no_readings")
+        self.assertFalse(summary["target_reached"])
+        self.assertTrue((session / "capture/analyzer_telemetry.jsonl").is_file())
+        self.assertFalse(telemetry.exists())
+        self.assertTrue((self.root / "results/master_results.xlsx").exists())
+
     def test_invalid_json_is_archived_before_error(self):
         raw = b"bad json\n" + (json.dumps(self.event) + "\n").encode()
         self.swap.write_bytes(raw)

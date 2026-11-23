@@ -965,9 +965,13 @@ def main():
                 if a.log:
                     raise ValueError("Choose --auto-record or an existing recording path.")
                 try:
+                    settings.setdefault("max_estimates", 100)
                     if not args:
                         settings["actual_distance"], settings["conditions"] = prompt_trial_details(a.out)
                     settings["firmware"] = snapshot_firmware()
+                    from support.capture_setup import print_setup_summary
+                    print_setup_summary(settings["firmware"], settings["actual_distance"],
+                                        settings.get("conditions"), data=Path(a.out).parent)
                     with automatic_recording(a.folder) as recording:
                         if snapshot_firmware() != settings["firmware"]:
                             raise ValueError("Firmware settings changed while connecting. Flash both boards and start a new capture.")

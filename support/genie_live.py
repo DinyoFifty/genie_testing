@@ -13,6 +13,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 from queue import Empty, Queue
 from statistics import median
 import subprocess
@@ -662,6 +663,9 @@ def run_live(log=None, folder="data", out="data/live", duration=None,
         plt.show(block=False)
     started_at_utc = datetime.now(timezone.utc)
     conditions = normalize_conditions(conditions)
+    if calibration is None:
+        from .master_results import test_context
+        conditions = {**test_context(Path(out).resolve().parent), **conditions}
     session = create_live_session(out, actual_distance, conditions)
     capture = session / "capture"
     capture.mkdir()
@@ -672,6 +676,7 @@ def run_live(log=None, folder="data", out="data/live", duration=None,
     count = 0
     selected_count = 0
     filtered_count = 0
+    observed_finite_filtered = 0
     additional_results = 0
     mean = 0.0
     abs_error_sum = squared_error_sum = signed_error_sum = 0.0
@@ -688,6 +693,8 @@ def run_live(log=None, folder="data", out="data/live", duration=None,
                 "records": count, "selected_field": field, "stop_reason": stop_reason,
                 "finite_reported_distance_count": selected_count,
                 "finite_filtered_estimate_count": filtered_count,
+                "observed_finite_filtered_result_count": observed_finite_filtered,
+                "observed_without_finite_filtered_distance_count": count - observed_finite_filtered,
                 "estimate_target": max_estimates,
                 "target_reached": max_estimates is not None and filtered_count >= max_estimates,
                 "additional_recorded_results": additional_results,
@@ -711,6 +718,7 @@ def run_live(log=None, folder="data", out="data/live", duration=None,
 
     def save_batch(batch, raw_capture, writer):
         nonlocal count, selected_count, filtered_count, additional_results
+        nonlocal observed_finite_filtered
         nonlocal mean, peer, signed_error_sum, abs_error_sum, squared_error_sum
         # Preserve the entire polled batch before parsing, including any tail
         # already consumed by the reader when an earlier line is malformed.
@@ -728,6 +736,8 @@ def run_live(log=None, folder="data", out="data/live", duration=None,
                 raise ValueError("Recording contains multiple peers; use a separate recording per reflector")
             peer = identity
             count += 1
+            if finite(obj.get("distanceMain")):
+                observed_finite_filtered += 1
             if max_estimates is not None and filtered_count >= max_estimates:
                 additional_results += 1
                 continue
@@ -810,6 +820,15 @@ def run_live(log=None, folder="data", out="data/live", duration=None,
         if reader.pending:
             (capture / "partial_line.bin").write_bytes(reader.pending)
         save_summary()
+        telemetry = reader.path.with_name(reader.path.name + ".telemetry.jsonl")
+        if recording is not None and telemetry.is_file() and not telemetry.is_symlink():
+            try:
+                shutil.copyfile(telemetry, capture / "analyzer_telemetry.jsonl")
+                # A verified local copy now belongs to the trial; keep a differing source.
+                if telemetry.read_bytes() == (capture / "analyzer_telemetry.jsonl").read_bytes():
+                    telemetry.unlink()
+            except OSError as error:
+                print(f"Telemetry copy incomplete: {error}", flush=True)
         if plt is not None:
             plt.close(fig)
         workbook_path = write_measurements_xlsx(csv_path, session / "measurements.xlsx")
@@ -822,6 +841,10 @@ def run_live(log=None, folder="data", out="data/live", duration=None,
             except OSError as error:
                 print(f"Could not save report plots in {session}: {error}", flush=True)
         save_summary()
+        # Guided captures are published from .pending by the caller first.
+        if calibration is None:
+            from .master_results import refresh_after_capture
+            refresh_after_capture(Path(out).resolve().parent)
     if plots_saved and count and count == reader.line and not reader.pending:
         recycle_duplicate_recording(reader.path, raw_path)
     print(f"Saved {count} reported results to {session}", flush=True)

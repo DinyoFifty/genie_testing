@@ -20,7 +20,8 @@ function checkAntennaModes() {
             argv: [process.execPath, "genie_analyzer.cjs", "profile", "recording", ...(session ? ["--session"] : [])],
             env: { GENIE_PBR_ANTENNAS: override }, stdin: input, execPath: process.execPath,
         });
-        const filesystem = { ...fs, readFileSync: () => `#define SL_RAIL_UTIL_CS_ANTENNA_COUNT ${count}\n` };
+        const filesystem = { ...fs, readFileSync: (file, ...args) => file.endsWith("sl_rail_util_cs_antenna_offset_config.h")
+            ? `#define SL_RAIL_UTIL_CS_ANTENNA_COUNT ${count}\n` : fs.readFileSync(file, ...args) };
         const context = vm.createContext({
             require: name => name === "node:fs" ? filesystem : require(name),
             __dirname: path.join(root, "support"), process: processMock, Buffer, setTimeout, clearTimeout, console,
@@ -96,12 +97,45 @@ async function checkSession() {
         assert.equal(fs.readFileSync(path.join(folder, "first.jsonl"), "utf8"), expected[0]);
         assert.equal(fs.readFileSync(path.join(folder, "second.jsonl"), "utf8"), expected[1]);
         assert.equal(fs.readFileSync(path.join(folder, "third.jsonl"), "utf8"), expected[2]);
-        assert.equal(fs.readdirSync(folder).length, 3);
+        assert.equal(fs.readdirSync(folder).length, 6);
     } finally {
         input.destroy();
         assert.equal(path.dirname(folder), os.tmpdir());
         fs.rmSync(folder, { recursive: true, force: true });
     }
+}
+
+function checkObserver() {
+    const events = [];
+    const starts = [];
+    let states = 0;
+    const worker = {
+        onStateMessage() { states += 1; },
+        async startMeasurement(id, config) { starts.push({ id, config }); return true; },
+    };
+    const context = vm.createContext({ require, __dirname: path.join(root, "support"),
+        process: { argv: [process.execPath, "genie_analyzer.cjs", "profile", "recording"], env: {},
+            stdin: { on() {}, resume() {} }, on() {} }, Buffer, setTimeout, clearTimeout, console,
+        document: { getElementById: () => ({ __vue_app__: { config: { globalProperties: {
+            $pinia: { _s: new Map([["localSession", { worker }]]) },
+        } } } }) },
+        window: { genieTelemetry: value => events.push(JSON.parse(value)) }, performance: { now: () => 5 },
+    });
+    vm.runInContext(definitions, context);
+    vm.runInContext('observeAnalyzer({name:"accuracy",algoMode:0,chMapPreset:2,scheduling:0})', context);
+    worker.onStateMessage({ message: "not inside trial" });
+    assert.equal(events.length, 0);
+    vm.runInContext('window.genieObserver.active = true', context);
+    worker.onStateMessage({ message: "diagnostic" });
+    assert.equal(states, 2);
+    assert.equal(events[0].kind, "state");
+    return worker.startMeasurement("r", { algoMode: 2, antennaPath: 7, connectionInterval: 8 }).then(() => {
+        assert.equal(starts[0].config.algoMode, 0);
+        assert.equal(starts[0].config.antennaPath, 7);
+        assert.equal(starts[0].config.connectionInterval, 8);
+        assert.equal(events[1].configuration.start_accepted, true);
+        assert.equal(events[1].configuration.profile, "accuracy");
+    });
 }
 
 async function checkSingleTrial() {
@@ -140,6 +174,75 @@ async function checkSingleTrial() {
     }
 }
 
+async function checkNoReadings() {
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "genie-empty-recording-test-"));
+    const output = path.join(folder, "empty.jsonl");
+    const input = new PassThrough();
+    const events = [];
+    let receive = () => {};
+    let clock = 0;
+    let advanceClock = false;
+    const processMock = new EventEmitter();
+    Object.assign(processMock, { argv: [process.execPath, "genie_analyzer.cjs", folder, output],
+        env: {}, stdin: input, execPath: process.execPath });
+    const debuggerMock = {
+        receive(callback) { receive = callback; }, check() {},
+        async evaluate(fn) {
+            if (fn.toString().includes("const originalPicker")) advanceClock = true;
+            else { advanceClock = false; receive({ close: true }); }
+            return true;
+        },
+    };
+    const context = vm.createContext({ require, __dirname: path.join(root, "support"),
+        process: processMock, Buffer, setTimeout, clearTimeout,
+        Date: { now: () => advanceClock ? (clock += 31000) : 0 },
+        console: { error() {}, log(value) { events.push(value); } }, debuggerMock });
+    try {
+        vm.runInContext(definitions, context);
+        await vm.runInContext('record(debuggerMock, "record-button")', context);
+        assert.deepEqual(events, ["READY", "no_readings"]);
+        assert.equal(fs.readFileSync(output, "utf8"), "");
+        assert(fs.existsSync(output + ".telemetry.jsonl"));
+    } finally {
+        input.destroy();
+        assert.equal(path.dirname(folder), os.tmpdir());
+        fs.rmSync(folder, { recursive: true, force: true });
+    }
+}
+
+async function checkUnusableResultLimit() {
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "genie-unusable-recording-test-"));
+    const output = path.join(folder, "unusable.jsonl");
+    const input = new PassThrough();
+    const events = [];
+    let receive = () => {};
+    const processMock = new EventEmitter();
+    Object.assign(processMock, { argv: [process.execPath, "genie_analyzer.cjs", folder, output],
+        env: {}, stdin: input, execPath: process.execPath });
+    const debuggerMock = {
+        receive(callback) { receive = callback; }, check() {},
+        async evaluate(fn) {
+            if (fn.toString().includes("const originalPicker")) {
+                receive({ bytes: Buffer.from(line(null).repeat(1000)).toString("base64") });
+            } else receive({ close: true });
+            return true;
+        },
+    };
+    const context = vm.createContext({ require, __dirname: path.join(root, "support"),
+        process: processMock, Buffer, setTimeout, clearTimeout,
+        console: { error() {}, log(value) { events.push(value); } }, debuggerMock });
+    try {
+        vm.runInContext(definitions, context);
+        await vm.runInContext('record(debuggerMock, "record-button")', context);
+        assert.deepEqual(events, ["READY", "result_limit"]);
+        assert.equal(fs.readFileSync(output, "utf8"), line(null).repeat(1000));
+    } finally {
+        input.destroy();
+        assert.equal(path.dirname(folder), os.tmpdir());
+        fs.rmSync(folder, { recursive: true, force: true });
+    }
+}
+
 checkAntennaModes();
-checkSession().then(checkSingleTrial).then(() => console.log("Antenna mode, persistent, and single-trial recorder checks passed"))
+checkSession().then(checkSingleTrial).then(checkNoReadings).then(checkUnusableResultLimit).then(checkObserver).then(() => console.log("Antenna modes, recorder, zero/unusable-reading safeguards and configuration/diagnostic checks passed"))
     .catch(error => { console.error(error); process.exitCode = 1; });

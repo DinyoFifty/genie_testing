@@ -159,6 +159,10 @@ async function main() {
         await commands.get("genieFilesManager.prepareLayout")();
         assert(!visibleViews.includes("outline"));
         const data = (await provider.getChildren()).find(item => item.label === "data");
+        const master = (await provider.getChildren()).find(item => item.label === "Master results.xlsx");
+        assert.equal(master.command.command, "genieFilesManager.openResults");
+        assert(commands.has("genieFilesManager.openResults"));
+        assert((await provider.getChildren()).some(item => item.label === "results.py"));
         const liveItem = (await provider.getChildren(data))[0];
         const liveChildren = await provider.getChildren(liveItem);
         assert.equal(liveChildren[0].label, "Guided batches");

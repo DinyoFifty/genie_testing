@@ -1,4 +1,6 @@
-# Data dictionary
+# Offline CSV dictionary
+
+For live testing, use **Definitions** in the master workbook or **Label guide** in [results.py](../../results.py). The tables below describe the advanced offline CSV commands in [analyzer.py](../../analyzer.py).
 
 CSV uses UTF-8, a header row, and empty cells for missing values. Never enter zero to stand in for missing data. Units in normalized column names describe this tool's contract, not unverified Analyzer source units. Enter literal `none` only in descriptive fields when absence is confirmed. Numeric missing values must remain empty.
 

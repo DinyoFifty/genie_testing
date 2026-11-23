@@ -1,8 +1,10 @@
 const vscode = require("vscode");
 const path = require("node:path");
 const fs = require("node:fs/promises");
+const { execFile } = require("node:child_process");
+const { promisify } = require("node:util");
 
-const scripts = ["calibration.py", "normal.py", "flash.py", "analyzer.py", "linearreg.py", "README.md"];
+const scripts = ["calibration.py", "normal.py", "flash.py", "analyzer.py", "linearreg.py", "results.py", "README.md"];
 const offsetHeader = "sl_rail_util_cs_antenna_offset_config.h";
 
 async function activate(context) {
@@ -16,6 +18,18 @@ async function activate(context) {
     const liveRoot = path.join(root, "data", "live");
     const guidedRoot = path.join(liveRoot, "guided");
     const changes = new vscode.EventEmitter();
+
+    async function openResults() {
+        try {
+            const python = path.join(root, ".venv", "Scripts", "python.exe");
+            await fs.access(python);
+            await promisify(execFile)(python, [path.join(root, "results.py"), "--refresh"],
+                { cwd: root, windowsHide: true });
+            await vscode.env.openExternal(vscode.Uri.file(path.join(root, "data", "results", "master_results.xlsx")));
+        } catch (error) {
+            await vscode.window.showErrorMessage(`Could not refresh master results. Close Excel and retry; run setup.cmd if Python is missing. ${error.message}`);
+        }
+    }
 
     async function prepareLayout() {
         // Use VS Code's view commands so its own layout persistence stays in charge.
@@ -87,6 +101,8 @@ async function activate(context) {
         const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
         item.resourceUri = vscode.Uri.file(path.join(root, relativePath));
         item.tooltip = item.resourceUri.fsPath;
+        if (relativePath === "results.py") item.tooltip = "Review batches, test setup, measurement evidence, and the master workbook.";
+        if (relativePath === "linearreg.py") item.tooltip = "Calibrate isolated antennas or optionally check normal-mode accuracy.";
         const managed = ["progress.json", "progress.lock", "progress.active.json"].includes(path.basename(relativePath).replace(/^\./, ""));
         item.contextValue = isLiveEntry(item.resourceUri.fsPath) && !managed ? "genieLiveFile" : "genieFile";
         item.command = { command: "vscode.open", title: "Open", arguments: [item.resourceUri] };
@@ -174,17 +190,20 @@ async function activate(context) {
                 return children;
             }
             if (item) return [];
+            const master = file(path.join("data", "results", "master_results.xlsx"), "Master results.xlsx");
+            master.command = { command: "genieFilesManager.openResults", title: "Refresh and open master results" };
             return [
                 offsets("Initiator offsets", "bt_cs_ncp"),
                 offsets("Reflector offsets", "bt_cs_soc_reflector_studio"),
                 ...scripts.map(name => file(name)),
+                master,
                 folder("data"),
             ];
         },
     };
 
     const liveChanges = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(workspace, "data/live/**"));
+        new vscode.RelativePattern(workspace, "data/**"));
     context.subscriptions.push(
         changes,
         liveChanges,
@@ -193,6 +212,7 @@ async function activate(context) {
             canSelectMany: true,
         }),
         vscode.commands.registerCommand("genieFilesManager.prepareLayout", prepareLayout),
+        vscode.commands.registerCommand("genieFilesManager.openResults", openResults),
         vscode.commands.registerCommand("genieFilesManager.reveal", item =>
             vscode.commands.executeCommand("revealInExplorer", item.resourceUri)),
         vscode.commands.registerCommand("genieFilesManager.delete", async (item, selectedItems = [item]) => {

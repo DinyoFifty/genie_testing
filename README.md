@@ -9,7 +9,7 @@ The tested setup uses 64-bit Windows and BRD2606A boards. Install these applicat
 - [Visual Studio Code](https://code.visualstudio.com/).
 - [Simplicity Studio 6 and Simplicity Installer](https://www.silabs.com/software-and-tools/simplicity-studio).
 
-Extract the entire ZIP into a short local path such as `C:\Projects\genie_testing`. Double-click [setup.cmd](setup.cmd) in **File Explorer**. It opens the project in VS Code when finished, so you do not need to open VS Code first. Keep the setup window open until it says setup is complete. An internet connection is needed for missing downloads.
+On GitHub, choose **Code > Download ZIP**. Extract the entire ZIP into a short local path such as `C:\Projects\genie_testing`. Double-click [setup.cmd](setup.cmd) in **File Explorer**. It opens the project in VS Code when finished, so you do not need to open VS Code first. Keep the setup window open until it says setup is complete. An internet connection is needed for missing downloads.
 
 Setup reuses an available 64-bit Python **3.11**, or downloads the official **3.11.9** Windows installer and installs it for your Windows account. It verifies the download's SHA-256 checksum and continues without requiring a terminal restart. An existing Python of another version can remain installed.
 
@@ -102,13 +102,13 @@ Delete a batch with **Genie Files > Guided batches > right-click the batch > Del
 
 ### 5. Analyze the trials
 
-Run [linearreg.py](linearreg.py) and select the trial folders to analyze together.
+Run [linearreg.py](linearreg.py). Each guided batch appears as one row; click it once to analyze all its completed trials. For single trials, use Ctrl or Shift to select the rows to analyze together, then click **Analyze selected**.
 
 ```powershell
 .\.venv\Scripts\python.exe linearreg.py
 ```
 
-For a full calibration batch, select the 40 completed trials for one physical antenna and one offset baseline. The tool combines repeated trials within an orientation, then takes the median of the orientation results separately at each actual distance. It fits the five summarized distance points.
+For a full calibration batch, click the batch containing the 40 completed trials for one physical antenna and one offset baseline. The tool combines repeated trials within an orientation, then takes the median of the orientation results separately at each actual distance. It fits the five summarized distance points. Normal-mode analysis is optional: it checks remaining error and does not change calibration offsets.
 
 Repeated trials at one distance provide a constant-bias estimate with an assumed slope of 1. Multiple distances let the fit estimate slope and intercept.
 
@@ -117,6 +117,24 @@ Single trials recorded through the Analyzer launcher, and guided trials, save th
 These settings come from the project configuration when recording starts. Flash both boards after changes; the readings do not identify which firmware was actually flashed.
 
 Apply physical calibration recommendations to the headers, flash both boards, and collect fresh measurements to check the result. After calibrating ANT1 and ANT2, run [normal.py](normal.py), flash both boards, and proceed with dual-antenna testing.
+
+### Normal test results
+
+Setup creates each teammate's empty master workbook with the shared headers, formatting and checklist. Readings and evidence fill only their local workbook. Pulling updates refreshes the report layout from their own saved captures.
+
+Run [results.py](results.py) from Genie Files before testing. **Next test setup** saves the location, object in the way, board tilt, movement, power source and operator for future captures. Guided batches keep their original setup. Choose a baseline, accuracy or energy profile to compare Analyzer tracking or scheduling settings on the next connection; use a new batch for each profile. Calibration offsets stay fixed. Analyzer prints the saved setup before recording; unknown details stay labeled unknown. Saved settings are not flashed-firmware readback.
+
+Collect the 40-condition baseline, then repeat comparable tests in open LOS, garage LOS and obstructed conditions. Test motion separately. Automatic single captures now stop at 100 finite filtered readings. Automatic captures also stop after 120 seconds or 1,000 result messages, saving partial results when readings remain unusable.
+
+Results opens with real trials visible and batches collapsed. Expand a batch to select a trial. Use **Show** to include simulated captures, or search for a batch or condition. Distances and angles sort numerically. The selected trial shows which attempt, timing, power and TX evidence is available. **Label guide** gives short explanations.
+
+**Master results.xlsx** in Genie Files refreshes and opens the local comparison workbook. Captures also refresh it automatically. **Overview** summarizes each batch/setup separately; its error statistics use all retained readings with a known actual distance, including partial recordings. **Definitions** explains every column and the common abbreviations. Other tabs contain individual trials, the 40-condition normal checklist, and saved configuration. Close Excel before refreshing. Use **Trial details** in [results.py](results.py) for corrections and evidence; edits made directly in the generated workbook are replaced on refresh. If Excel locks the file, the Results list still updates; close Excel and refresh to update the workbook.
+
+Results without a finite filtered distance are counted from the complete raw recording, including Stop's final messages. Analyzer state messages are saved separately as diagnostics. Neither proves a complete count of radio attempts. **Import attempts** accepts a verified CSV with `attempt_id,status` (`valid`, `failed`, `unresolved`). Confirm complete coverage only if every attempt in the trial window was observed. Otherwise the valid percentage stays blank. Optional `request_time_s,result_time_s,clock_id` provide paired-clock latency; document the endpoints and source.
+
+**Import reflector power** accepts reflector-only instrument samples with `time_s,current_ma` and optional measured `voltage_v`. Current is time-weighted over that window. Energy per sounding cycle additionally needs the number of cycles inside the same window. Unknown timing, current and verified TX power remain blank. The board supports at most +10 dBm; requested Analyzer settings are saved but are not RF-power readback.
+
+The workbook lists the team's provisional targets. Confirm their definitions with Genie before using them as acceptance criteria. Normal-mode regression checks residual error; it does not recalibrate from validation data.
 
 ## Find the results
 
@@ -132,6 +150,8 @@ Naming rules, prompts, report formatting, and the Genie Files layout are shared 
 | `capture/raw.jsonl` | Original received records |
 | `capture/measurements.csv` | Exported measurement rows |
 | `capture/summary.json` | Trial conditions, statistics, and completion information |
+| `capture/analyzer_telemetry.jsonl` | Requested Analyzer configuration and observed diagnostics, for new automatic captures |
+| `data/results/master_results.xlsx` | Local trial comparisons, configuration, checklist and provisional targets |
 
 The PNGs are saved at 300 dpi. A supplied actual distance appears as a red dotted line. Reading order uses sample number.
 
@@ -142,14 +162,8 @@ Finalized source recordings are automatically recycled after their contents have
 
 ## Share with teammates
 
-Send `genie_testing.zip`. It contains the five main scripts, setup, the sidebar installer, helper code, and complete copies of both firmware projects. Each teammate extracts it and follows **First-time setup**.
+Send the [GitHub repository link](https://github.com/DinyoFifty/genie_testing). Each teammate chooses **Code > Download ZIP**, extracts the entire folder, and follows **First-time setup**.
 
-The ZIP starts with an empty [data/live/](data/live/). Captures, trial progress, reports, logs, Python environments, build caches, board assignments, and local configuration files are excluded from Git and the ZIP. Teammates get the shared defaults and calibrate their own boards. Share selected trial folders separately when needed.
+GitHub generates its ZIP from the files on the selected branch. Commit and push shared code changes to update future downloads; a separate ZIP in Downloads does not need to be rebuilt or uploaded.
 
-To make a fresh ZIP after changing the code, run this command from the project terminal.
-
-```powershell
-.\.venv\Scripts\python.exe -B support\package_project.py
-```
-
-The packager writes `genie_testing.zip` beside the project folder and includes actual firmware contents even when the local firmware folders are junctions. It also rebuilds the bundled Genie Files extension from [support/vscode-workflow/](support/vscode-workflow/).
+Captures, trial progress, reports, logs, Python environments, build caches, board assignments, and local configuration files are excluded from Git and its ZIP download. Teammates get the shared defaults and calibrate their own boards. Share selected trial folders separately when needed.

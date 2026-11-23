@@ -91,8 +91,9 @@ def board_role(board, roles):
     if serial in roles:
         return roles[serial]
     print(f"\nNew board detected, J-Link {serial}.")
+    print("1. Initiator\n2. Reflector")
     while True:
-        answer = input("Board role? 1 = initiator, 2 = reflector, skip = leave it alone: ").strip().lower()
+        answer = input("Choose 1 or 2, or enter skip to leave this board alone: ").strip().lower()
         if answer == "skip":
             return None
         role = {

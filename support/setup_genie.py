@@ -251,6 +251,8 @@ def main():
             configure_paths(ROOT, tools)
             report["stage"] = "VS Code extensions"
             install_extensions(tools["code"])
+            report["stage"] = "Master results workbook"
+            subprocess.run([str(python), "-B", str(ROOT / "results.py"), "--refresh"], check=True)
         if not args.check and not args.no_open:
             report["stage"] = "Opening VS Code"
             subprocess.run([str(tools["code"]), str(ROOT / "genie_testing.code-workspace")], check=True)

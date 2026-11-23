@@ -104,6 +104,22 @@ class SetupTests(unittest.TestCase):
                 setup_genie.install_extensions(Path("code.cmd"))
             self.assertEqual(execute.call_count, 1)
 
+    def test_setup_creates_master_workbook_with_project_python(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            python = root / ".venv/Scripts/python.exe"
+            with patch.object(setup_genie, "ROOT", root), patch.object(sys, "argv", ["setup", "--no-open"]), patch.object(
+                setup_genie, "prepare_silabs_tools", return_value={},
+            ), patch.object(setup_genie, "installed_tools", return_value={"code": Path("code.cmd")}), patch.object(
+                setup_genie, "prepare_environment", return_value=python,
+            ), patch.object(setup_genie, "verify_environment", return_value={}), patch.object(
+                setup_genie, "configure_paths",
+            ), patch.object(setup_genie, "install_extensions"), patch.object(
+                setup_genie.subprocess, "run", return_value=subprocess.CompletedProcess([], 0),
+            ) as execute:
+                self.assertEqual(setup_genie.main(), 0)
+            execute.assert_called_once_with([str(python), "-B", str(root / "results.py"), "--refresh"], check=True)
+
     def test_builds_missing_sidebar_installer_from_shared_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

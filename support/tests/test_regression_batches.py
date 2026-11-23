@@ -9,7 +9,7 @@ import unittest
 
 from linearreg import (
     ANTENNA_PAIRS, USED_OFFSETS, calibration_baseline, distance_fit, find_runs,
-    recommended_offsets, regression_data,
+    group_runs, group_values, recommended_offsets, regression_data,
 )
 
 
@@ -73,6 +73,43 @@ class RegressionBatchTests(unittest.TestCase):
         offsets, _ = recommended_offsets(baseline["offsets"], baseline["pair"], USED_OFFSETS[1],
                                          actual, distance_fit(actual, measured), pairs)
         self.assertEqual(offsets, ((280, 67, 0, 0), (280, 67, 0, 0)))
+
+    def test_selecting_one_batch_includes_its_trials_without_other_baselines(self):
+        other = copy.deepcopy(self.metadata)
+        other["batch_id"] = "different-baseline"
+        for project in other["firmware"]["projects"].values():
+            project["wireless_offsets_cm"][0] = 60
+        for index in range(40):
+            distance = (1, 2, 5, 10, 20)[index // 8]
+            self.add_run(f"guided/Batch1_ANT1-ANT1/condition-{index}", distance, distance + 0.2)
+            self.add_run(f"guided/Batch2_ANT1-ANT1/condition-{index}", distance,
+                         distance + 0.4, metadata=other)
+        groups = group_runs(find_runs(self.live))
+        self.assertEqual(len(groups), 2)
+        self.assertTrue(all(group.guided for group in groups))
+        self.assertEqual([len(group.runs) for group in groups], [40, 40])
+        actual, measured, _, skipped = regression_data(groups[0].runs)
+        self.assertEqual(actual, [1, 2, 5, 10, 20])
+        self.assertAlmostEqual(distance_fit(actual, measured).intercept, 0.2)
+        self.assertFalse(skipped)
+        self.assertEqual(group_values(groups[0])[1:3], (40, "1, 2, 5, 10, 20"))
+        batch_only = group_runs(find_runs(self.live / "guided/Batch1_ANT1-ANT1"))
+        self.assertEqual(len(batch_only), 1)
+        self.assertEqual(len(batch_only[0].runs), 40)
+
+    def test_batch_selection_skips_incomplete_trials_and_preserves_single_rows(self):
+        self.add_run("guided/Batch1_ANT1-ANT1/complete")
+        self.add_run("guided/Batch1_ANT1-ANT1/interrupted", target_reached=False)
+        self.add_run("single-1", guided=False)
+        self.add_run("single-2", actual=2, guided=False)
+        groups = group_runs(find_runs(self.live))
+        self.assertEqual(len(groups), 3)
+        self.assertTrue(groups[0].guided)
+        self.assertEqual(group_values(groups[0])[-1], "1 ready; 1 skipped")
+        self.assertEqual([len(group.runs) for group in groups], [2, 1, 1])
+        actual, _, _, skipped = regression_data(groups[0].runs)
+        self.assertEqual(actual, [1])
+        self.assertEqual(len(skipped), 1)
 
     def test_single_trials_use_captured_zero_and_nonzero_offsets(self):
         for old_offset in (0, 60):

@@ -137,8 +137,9 @@ def _apply_summary(progress, summary, session, live_dir=None):
     if any(metadata.get(key) != progress[key] for key in ("rotated_board", "fixed_yaw_deg", "setup")):
         attempt.update(status="excluded", detail="Captured setup differs from this batch.")
         return
+    from .master_results import CONTEXT_FIELDS
     setup = {key: value for key, value in conditions.items()
-             if key in ("initiator_height_m", "reflector_height_m", "setup_notes")}
+             if key in ("initiator_height_m", "reflector_height_m", "setup_notes", *CONTEXT_FIELDS)}
     if setup != progress["setup"]:
         attempt.update(status="excluded", detail="Board heights or setup notes differ from this batch.")
         return
@@ -225,6 +226,7 @@ def _number(question, default=None, *, nonnegative=False):
 
 
 def _new_progress(snapshot, live_dir):
+    from .master_results import test_context, radio_profile
     print("Yaw is measured clockwise from each board's 0-degree baseline, viewed from above (0 to 359 degrees).", flush=True)
     while True:
         rotated = input("Board to rotate [reflector/initiator, Enter = reflector]? ").strip().casefold()
@@ -239,7 +241,7 @@ def _new_progress(snapshot, live_dir):
         if fixed_yaw is None:
             print("Enter the fixed board's yaw to define the 40 planned conditions. Enter uses 0 degrees.", flush=True)
     previous = last_board_heights(live_dir)
-    setup = {}
+    setup = dict(test_context(Path(live_dir).parent))
     for role in PROJECTS:
         key = f"{role}_height_m"
         default = previous.get(key)
@@ -254,6 +256,7 @@ def _new_progress(snapshot, live_dir):
     return {"version": PROGRESS_VERSION, "batch_id": uuid4().hex,
             "created_at_utc": now.isoformat(), "firmware": snapshot, "rotated_board": rotated,
             "fixed_yaw_deg": fixed_yaw, "setup": setup, "board_pair": None,
+            "radio_profile": radio_profile(Path(live_dir).parent),
             "attempts": [], "completed_conditions": []}
 
 
@@ -521,6 +524,7 @@ def delete_batch(path, live_dir):
 
 
 def choose_batch(snapshot, live_dir, calibration_dir):
+    from .master_results import radio_profile
     migrate_single_trials(live_dir)
     migrate_batches(live_dir, calibration_dir)
     guided = Path(live_dir) / "guided"
@@ -539,7 +543,9 @@ def choose_batch(snapshot, live_dir, calibration_dir):
                 continue
             batches.append((path, progress))
         batches.sort(key=lambda item: item[1].get("created_at_utc", ""), reverse=True)
-        compatible = [index for index, (_, progress) in enumerate(batches, 1) if progress["firmware"] == snapshot]
+        compatible = [index for index, (_, progress) in enumerate(batches, 1)
+                      if progress["firmware"] == snapshot
+                      and progress.get("radio_profile", "baseline") == radio_profile(Path(live_dir).parent)]
         if not batches:
             choice = (input("No saved batches. Enter new or done [Enter = new]? ").strip().casefold() or "new"
                       if managed else "new")
@@ -547,7 +553,7 @@ def choose_batch(snapshot, live_dir, calibration_dir):
             managed = True
             for index, (path, progress) in enumerate(batches, 1):
                 different = " (different antenna/settings)" if index not in compatible else ""
-                print(f"{index}. {_batch_folder(path).name} â€” {len(progress['completed_conditions'])}/40 complete, "
+                print(f"{index}. {_batch_folder(path).name} - {len(progress['completed_conditions'])}/40 complete, "
                       f"rotate {progress['rotated_board']}{different}", flush=True)
             default = str(compatible[0]) if compatible else "new"
             choice = input(f"Resume batch [Enter = {default}], new, delete NUMBER, or done? ").strip().casefold() or default
@@ -583,7 +589,7 @@ def show_status(progress):
     for distance in DISTANCES:
         missing = [str(angle) for angle in ANGLES if f"{distance:g}m_{angle:g}deg" not in completed]
         detail = ", ".join(missing) if missing else "all complete"
-        print(f"{distance:g} m â€” {8 - len(missing)}/8 complete. Pending yaw {detail}", flush=True)
+        print(f"{distance:g} m - {8 - len(missing)}/8 complete. Pending yaw {detail}", flush=True)
 
 
 def _prompt_trial(progress):
@@ -672,18 +678,31 @@ def run_guided(folder, out, *, plot=True, interval=0.5):
                 if snapshot_firmware() != progress["firmware"]:
                     print("Firmware settings changed. Progress is saved. Flash the boards and start a new batch.", flush=True)
                     break
+                from .master_results import radio_profile
+                if radio_profile(live_dir.parent) != progress.get("radio_profile", "baseline"):
+                    print("Analyzer profile changed. Start a new batch to compare settings.", flush=True)
+                    break
                 distance, conditions = trial
+                from .capture_setup import print_setup_summary
+                print_setup_summary(progress["firmware"], distance, conditions, data=live_dir.parent,
+                                    profile=progress.get("radio_profile", "baseline"), board_pair=progress.get("board_pair"),
+                                    use_defaults=False)
                 metadata = begin_attempt(progress, path, distance, conditions)
                 if client is None:
                     client = connections.enter_context(analyzer_session(folder))
                 if snapshot_firmware() != progress["firmware"]:
                     print("Firmware settings changed while connecting. Progress is saved. Start a new batch after flashing.", flush=True)
                     break
+                if radio_profile(live_dir.parent) != progress.get("radio_profile", "baseline"):
+                    print("Analyzer profile changed while connecting. Start a new batch for the new settings.", flush=True)
+                    break
                 capture = client.start(max_estimates=ESTIMATE_TARGET)
                 session = run_live(folder=folder, out=batch / ".pending", interval=interval, plot=plot,
                                    field="distanceMain", actual_distance=distance, conditions=conditions,
                                    recording=capture, max_estimates=ESTIMATE_TARGET, calibration=metadata)
                 session = publish_trial(progress, path, session, live_dir)
+                from .master_results import refresh_after_capture
+                refresh_after_capture(live_dir.parent)
                 path = _progress_path(batch)
                 recover_progress(progress, live_dir)
                 save_progress(path, progress)

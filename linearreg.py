@@ -47,6 +47,42 @@ class DistanceFit:
     intercept: float
 
 
+@dataclass
+class RunGroup:
+    folder: Path
+    runs: list[Run]
+    guided: bool = False
+
+
+def group_runs(runs):
+    """Show each guided batch once while keeping single trials selectable."""
+    groups = {}
+    for run in runs:
+        batch = next((parent for parent in run.folder.parents
+                      if parent.parent.name == "guided"), None)
+        folder = batch or run.folder
+        if folder not in groups:
+            groups[folder] = RunGroup(folder, [], batch is not None)
+        groups[folder].runs.append(run)
+    return sorted(groups.values(), key=lambda group: (not group.guided, group.folder.name.casefold()))
+
+
+def group_values(group):
+    distances = sorted({run.actual_m for run in group.runs if run.actual_m is not None})
+    configurations = {capture_configuration(run) for run in group.runs}
+    configuration = next(iter(configurations)) if len(configurations) == 1 else "Mixed settings"
+    ready = sum(not run.issue for run in group.runs)
+    status = f"{ready} ready" if ready == len(group.runs) else f"{ready} ready; {len(group.runs) - ready} skipped"
+    try:
+        calibration_baseline(group.runs)
+    except ValueError:
+        status = "Settings conflict"
+    if all(run.simulated for run in group.runs):
+        status = "SIMULATED - " + status
+    return (group.folder.name, len(group.runs), ", ".join(f"{value:g}" for value in distances),
+            configuration, status)
+
+
 def find_runs(live_dir):
     if not live_dir.is_dir():
         return []
@@ -95,6 +131,9 @@ def guided_trial_complete(summary):
 def calibration_baseline(runs):
     """Read capture-time settings for guided and single trials, never today's headers."""
     usable = [run for run in runs if not run.issue]
+    from support.master_results import experiment_signature
+    if len({experiment_signature(run.folder) for run in usable}) > 1:
+        raise ValueError("Select trials with the same Analyzer profile and test setup together. Compare different settings separately.")
     if len({run.simulated for run in usable}) > 1:
         raise ValueError("Select simulated and real measurements separately.")
     captured = [run for run in usable if run.calibration is not None or run.firmware is not None]
@@ -427,40 +466,44 @@ def main():
                         help="Live folder or guided batch to analyze; defaults to this project's live results.")
     live_dir = parser.parse_args().folder
     root = tk.Tk()
-    root.title("Select Genie folders for linear regression")
+    root.title("Genie calibration and accuracy check")
     root.geometry("1130x430")
     root.minsize(940, 330)
     frame = ttk.Frame(root, padding=14)
     frame.pack(fill="both", expand=True)
-    ttk.Label(frame, text="Select live folders to analyze together. Use Ctrl or Shift to select multiple.").pack(
+    ttk.Label(frame, text="Click a batch to analyze it. For single trials, select rows and click Analyze selected.").pack(
         anchor="w", pady=(0, 8))
+    ttk.Label(frame, text="Calibration estimates offsets. Normal-mode analysis checks accuracy and keeps offsets fixed.").pack(
+        anchor="w", pady=(0, 10))
     table_frame = ttk.Frame(frame)
     table_frame.pack(fill="both", expand=True)
-    tree = ttk.Treeview(table_frame, columns=("folder", "tape", "batch", "configuration", "status"),
-                        show="headings", selectmode="extended")
+    table_frame.columnconfigure(0, weight=1)
+    table_frame.rowconfigure(0, weight=1)
+    style = ttk.Style(root)
+    style.configure("Regression.Treeview", font=("Segoe UI", 10), rowheight=28)
+    style.configure("Regression.Treeview.Heading", font=("Segoe UI", 10, "bold"))
+    tree = ttk.Treeview(table_frame, columns=("folder", "trials", "tape", "configuration", "status"),
+                        show="headings", selectmode="extended", style="Regression.Treeview")
     scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
-    tree.configure(yscrollcommand=scrollbar.set)
+    horizontal = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+    tree.configure(yscrollcommand=scrollbar.set, xscrollcommand=horizontal.set)
     for key, heading, width in (
-        ("folder", "Live folder", 200), ("tape", "Tape distance (m)", 112),
-        ("batch", "Guided batch", 180),
-        ("configuration", "Saved configuration", 310), ("status", "Status", 180),
+        ("folder", "Guided batch / single trial", 330), ("trials", "Trials", 55),
+        ("tape", "Actual distances (m)", 150),
+        ("configuration", "Saved configuration", 310), ("status", "Status", 215),
     ):
         tree.heading(key, text=heading)
-        tree.column(key, width=width, anchor="w")
-    scrollbar.pack(side="right", fill="y")
-    tree.pack(fill="both", expand=True)
+        tree.column(key, width=width, minwidth=width, stretch=key == "folder", anchor="w")
+    tree.grid(row=0, column=0, sticky="nsew")
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    horizontal.grid(row=1, column=0, sticky="ew")
     runs = find_runs(live_dir)
-    for index, run in enumerate(runs):
-        tape = "" if run.actual_m is None else f"{run.actual_m:g}"
-        batch = (run.calibration.get("batch_name", run.calibration.get("batch_id", ""))
-                 if isinstance(run.calibration, dict) else "")
-        status = run.issue or "Ready"
-        if run.simulated:
-            status = "SIMULATED - " + status
-        tree.insert("", "end", iid=str(index), values=(run.folder.name, tape, batch, capture_configuration(run), status))
+    groups = group_runs(runs)
+    for index, group in enumerate(groups):
+        tree.insert("", "end", iid=str(index), values=group_values(group))
 
     def fit_selection():
-        selected = [runs[int(index)] for index in tree.selection()]
+        selected = [run for index in tree.selection() for run in groups[int(index)].runs]
         if not selected:
             messagebox.showinfo("Select folders", "Select the live folders to fit together.", parent=root)
             return
@@ -475,10 +518,18 @@ def main():
             return
         show_result(root, actual, measured, board_pairs, skipped, baseline)
 
+    def click_batch(event):
+        row = tree.identify_row(event.y)
+        if (row and len(tree.selection()) == 1 and row in tree.selection()
+                and groups[int(row)].guided and not event.state & 0x0005):
+            fit_selection()
+
     footer = ttk.Frame(frame)
     footer.pack(fill="x", pady=(10, 0))
-    ttk.Label(footer, text=f"{len(runs)} live folders found").pack(side="left")
-    ttk.Button(footer, text="Analyze selected folders", command=fit_selection).pack(side="right")
+    batch_count = sum(group.guided for group in groups)
+    ttk.Label(footer, text=f"{batch_count} guided batches; {len(groups) - batch_count} single trials").pack(side="left")
+    ttk.Button(footer, text="Analyze selected", command=fit_selection).pack(side="right")
+    tree.bind("<ButtonRelease-1>", click_batch)
     tree.bind("<Control-a>", lambda event: tree.selection_set(tree.get_children()))
     tree.bind("<Return>", lambda event: fit_selection())
     tree.focus_set()

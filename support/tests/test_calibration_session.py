@@ -1,7 +1,8 @@
 """Guided progress tests use saved synthetic summaries and mocked recorders."""
 
-from contextlib import nullcontext
+from contextlib import nullcontext, redirect_stdout
 import copy
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -56,6 +57,16 @@ class GuidedCalibrationTests(unittest.TestCase):
         for project in snapshot["projects"].values():
             project.update(physical_antenna=None, available_antennas=2, aox_control_pins=1)
         return snapshot
+
+    def test_batch_menu_and_progress_have_plain_text_separators(self):
+        output = io.StringIO()
+        with redirect_stdout(output), patch("builtins.input", return_value="done"):
+            self.assertIsNone(guided.choose_batch(self.snapshot, self.live, self.root / "data/calibration"))
+            guided.show_status(self.progress)
+        text = output.getvalue()
+        self.assertTrue(text.isascii(), repr(text))
+        self.assertIn("Batch1_ANT1-ANT1 - 0/40 complete", text)
+        self.assertIn("1 m - 0/8 complete", text)
 
     def test_normal_mode_completes_and_resumes_all_40_conditions(self):
         self.snapshot = self.normal_snapshot()
