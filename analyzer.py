@@ -961,12 +961,16 @@ def main():
                     raise ValueError("Estimate target must be a positive integer")
                 settings["max_estimates"] = a.estimates
             if a.auto_record:
+                from support.firmware_state import snapshot_firmware
                 if a.log:
                     raise ValueError("Choose --auto-record or an existing recording path.")
                 try:
                     if not args:
                         settings["actual_distance"], settings["conditions"] = prompt_trial_details(a.out)
+                    settings["firmware"] = snapshot_firmware()
                     with automatic_recording(a.folder) as recording:
+                        if snapshot_firmware() != settings["firmware"]:
+                            raise ValueError("Firmware settings changed while connecting. Flash both boards and start a new capture.")
                         run_live(**settings, recording=recording)
                 except EOFError:
                     raise ValueError("Trial setup needs terminal input. Run analyzer.py in the terminal or use analyzer.py live --auto-record to skip the questions.") from None

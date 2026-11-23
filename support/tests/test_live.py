@@ -76,6 +76,7 @@ class LiveTests(unittest.TestCase):
             patch("support.genie_live.last_board_heights", return_value={}),
             patch("support.genie_live.automatic_recording") as connect,
             patch("support.genie_live.run_live") as run,
+            patch("support.firmware_state.snapshot_firmware", return_value={"mode": "normal"}) as snapshot,
         ):
             def launch(_folder):
                 self.assertEqual(answer.call_count, 8)
@@ -88,6 +89,38 @@ class LiveTests(unittest.TestCase):
                          {"initiator_height_m": 1.5, "reflector_height_m": 1.6,
                           "initiator_yaw_deg": 45.0, "reflector_yaw_deg": 315.0})
         self.assertIs(run.call_args.kwargs["recording"], recording)
+        self.assertEqual(run.call_args.kwargs["firmware"], {"mode": "normal"})
+        self.assertEqual(snapshot.call_count, 2)
+
+    def test_single_capture_refuses_configuration_change_while_connecting(self):
+        with (
+            patch.object(sys, "argv", ["analyzer.py", "live", "--auto-record"]),
+            patch("support.firmware_state.snapshot_firmware", side_effect=[{"mode": "normal"}, {"mode": "isolated"}]),
+            patch("support.genie_live.automatic_recording", return_value=nullcontext(Mock())),
+            patch("support.genie_live.run_live") as run,
+            self.assertRaises(SystemExit) as stopped,
+        ):
+            genie.main()
+        self.assertEqual(stopped.exception.code, 2)
+        run.assert_not_called()
+
+    def test_single_capture_saves_firmware_metadata_for_automatic_regression(self):
+        from support.firmware_state import snapshot_firmware
+        from linearreg import calibration_baseline, find_runs
+
+        defaults = Path(__file__).resolve().parents[1] / "local_defaults/firmware"
+        firmware = snapshot_firmware(defaults)
+        self.path.write_text((json.dumps(self.event) + "\n") * 3, encoding="utf-8")
+        out = self.root / "live"
+        session = run_live(self.path, out=out, plot=False, max_estimates=3,
+                           actual_distance=1, firmware=firmware, simulated=True)
+        firmware["projects"]["initiator"]["wireless_offsets_cm"][0] = 999
+        summary = json.loads((session / "capture/summary.json").read_text())
+        self.assertEqual(summary["firmware"]["projects"]["initiator"]["wireless_offsets_cm"][0], 0)
+        self.assertEqual(summary["firmware_source"], "saved_project_configuration")
+        self.assertIsNone(summary["calibration"])
+        self.assertTrue(summary["simulated"])
+        self.assertEqual(calibration_baseline(find_runs(out))["mode"], "normal")
 
     def test_yaw_prompts_allow_skips_and_preserve_zero(self):
         out = self.root / "live"
@@ -217,6 +250,7 @@ class LiveTests(unittest.TestCase):
         self.assertEqual(summary["mae_m"], 1)
         self.assertEqual(summary["rmse_m"], 1)
         self.assertNotIn("successful_measurement_pct", summary)
+        self.assertIsNone(summary["firmware"])
 
     def test_invalid_json_is_archived_before_error(self):
         raw = b"bad json\n" + (json.dumps(self.event) + "\n").encode()

@@ -628,7 +628,8 @@ def automatic_recording(folder):
 
 def run_live(log=None, folder="data", out="data/live", duration=None,
              interval=0.5, plot=True, actual_distance=None, field="distanceMainRaw",
-             *, recording=None, conditions=None, max_estimates=None, calibration=None):
+             *, recording=None, conditions=None, max_estimates=None, calibration=None,
+             firmware=None, simulated=False):
     if not finite(interval) or interval <= 0:
         raise ValueError("Polling interval must be positive and finite")
     if duration is not None and (not finite(duration) or duration <= 0):
@@ -638,6 +639,10 @@ def run_live(log=None, folder="data", out="data/live", duration=None,
     if max_estimates is not None and (isinstance(max_estimates, bool)
                                      or not isinstance(max_estimates, int) or max_estimates <= 0):
         raise ValueError("Estimate target must be a positive integer")
+    if calibration is not None:
+        firmware = calibration.get("firmware")
+    # Keep the capture's baseline independent of later configuration edits.
+    firmware = json.loads(json.dumps(firmware)) if firmware is not None else None
     reader = RecordingReader(recording.path if recording is not None else log or find_recording(folder))
     if not reader.path.exists() and not any(recording_swaps(reader.path)):
         raise ValueError(f"Recording does not exist: {reader.path}")
@@ -690,6 +695,9 @@ def run_live(log=None, folder="data", out="data/live", duration=None,
                 "user_stopped": user_stopped,
                 "board_pair": list(peer) if peer is not None else None,
                 "calibration": calibration,
+                "firmware": firmware,
+                "firmware_source": "saved_project_configuration" if firmware is not None else None,
+                "simulated": bool(simulated),
                 "mean_reported_distance_m": mean if selected_count else None,
                 "actual_distance_m": actual_distance, "conditions": conditions or {},
                 "mean_signed_error_m": signed_error_sum / selected_count if selected_count and actual_distance is not None else None,

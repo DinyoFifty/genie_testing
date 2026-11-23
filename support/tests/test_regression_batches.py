@@ -74,6 +74,64 @@ class RegressionBatchTests(unittest.TestCase):
                                          actual, distance_fit(actual, measured), pairs)
         self.assertEqual(offsets, ((280, 67, 0, 0), (280, 67, 0, 0)))
 
+    def test_single_trials_use_captured_zero_and_nonzero_offsets(self):
+        for old_offset in (0, 60):
+            with self.subTest(offset=old_offset):
+                firmware = copy.deepcopy(self.metadata["firmware"])
+                for project in firmware["projects"].values():
+                    project["wireless_offsets_cm"][0] = old_offset
+                for distance in (1, 20):
+                    self.add_run(f"single-{old_offset}/{distance}m", distance,
+                                 distance + 1.6 - 2 * old_offset / 100,
+                                 guided=False, firmware=firmware)
+                runs = find_runs(self.live / f"single-{old_offset}")
+                baseline = calibration_baseline(runs)
+                self.assertIsNotNone(baseline)
+                self.assertEqual(baseline["pair"], ANTENNA_PAIRS[0])
+                self.assertEqual(baseline["offsets"][0][0], old_offset)
+                actual, measured, pairs, skipped = regression_data(runs)
+                self.assertFalse(skipped)
+                offsets, _ = recommended_offsets(baseline["offsets"], baseline["pair"], USED_OFFSETS[1],
+                                                 actual, distance_fit(actual, measured), pairs)
+                self.assertEqual(offsets[0][0], 80)
+                self.assertEqual(offsets[1][0], 80)
+
+    def test_single_ant2_and_normal_modes_are_automatic(self):
+        ant2 = copy.deepcopy(self.metadata["firmware"])
+        for project in ant2["projects"].values():
+            project["physical_antenna"] = 2
+        self.add_run("single-ant2/near", guided=False, firmware=ant2)
+        baseline = calibration_baseline(find_runs(self.live / "single-ant2"))
+        self.assertEqual(baseline["pair"], ANTENNA_PAIRS[1])
+        normal = self.normal_metadata()["firmware"]
+        self.add_run("single-normal/near", guided=False, firmware=normal)
+        baseline = calibration_baseline(find_runs(self.live / "single-normal"))
+        self.assertEqual(baseline["mode"], "normal")
+        self.assertIsNone(baseline["pair"])
+
+    def test_single_trials_with_different_saved_offsets_are_rejected(self):
+        firmware = copy.deepcopy(self.metadata["firmware"])
+        self.add_run("single-before", guided=False, firmware=firmware)
+        firmware["projects"]["reflector"]["wireless_offsets_cm"][0] = 60
+        self.add_run("single-after", guided=False, firmware=firmware)
+        with self.assertRaisesRegex(ValueError, "different antennas or firmware baselines"):
+            regression_data(find_runs(self.live))
+
+    def test_matching_guided_and_single_capture_settings_can_be_combined(self):
+        self.add_run("guided")
+        self.add_run("single", actual=2, measured=2.2, guided=False, firmware=self.metadata["firmware"])
+        baseline = calibration_baseline(find_runs(self.live))
+        self.assertEqual(baseline["pair"], ANTENNA_PAIRS[0])
+        actual, _, _, skipped = regression_data(find_runs(self.live))
+        self.assertEqual(actual, [1, 2])
+        self.assertFalse(skipped)
+
+    def test_simulated_and_real_captures_cannot_be_combined(self):
+        self.add_run("real")
+        self.add_run("simulated", simulated=True)
+        with self.assertRaisesRegex(ValueError, "simulated and real"):
+            regression_data(find_runs(self.live))
+
     def normal_metadata(self):
         metadata = copy.deepcopy(self.metadata)
         metadata["firmware"]["mode"] = "normal"

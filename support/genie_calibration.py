@@ -2,7 +2,6 @@
 
 from contextlib import contextmanager, ExitStack
 from datetime import datetime, timezone
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,7 +9,8 @@ import re
 from tempfile import NamedTemporaryFile
 from uuid import uuid4
 
-from flash import FIRMWARE, PROJECTS
+from flash import PROJECTS
+from .firmware_state import snapshot_firmware
 from .genie_live import analyzer_session, finite, last_board_heights, run_live
 from .trial_storage import (batch_active, condition_name, linked, local_timestamp,
                             migrate_single_trials, normalize_conditions, normalize_yaw,
@@ -21,68 +21,6 @@ DISTANCES = (1, 2, 5, 10, 20)
 ANGLES = tuple(range(0, 360, 45))
 ESTIMATE_TARGET = 100
 PROGRESS_VERSION = 1
-
-
-def _definition(source, name, path):
-    matches = re.findall(rf"^[ \t]*#define[ \t]+{re.escape(name)}[ \t]+([^\r\n]+)",
-                         source, re.MULTILINE)
-    if len(matches) != 1:
-        raise ValueError(f"Expected one definition of {name} in {path}.")
-    return matches[0].split("//", 1)[0].strip()
-
-
-def snapshot_firmware(firmware=FIRMWARE):
-    """Read the applied antenna mode and physical offset baseline."""
-    projects = {}
-    for role, project in PROJECTS.items():
-        config = Path(firmware) / project / "config"
-        header = config / "sl_rail_util_cs_antenna_offset_config.h"
-        source = header.read_text(encoding="utf-8-sig")
-        aox_path = config / "sl_rail_util_aox_config.h"
-        aox = aox_path.read_text(encoding="utf-8-sig")
-        count = int(_definition(source, "SL_RAIL_UTIL_CS_ANTENNA_COUNT", header), 0)
-        pins = int(_definition(aox, "SL_RAIL_UTIL_AOX_ANTENNA_PIN_COUNT", aox_path), 0)
-        if count not in (1, 2) or pins != count - 1:
-            raise ValueError("The antenna count and switch control settings disagree. "
-                             "Run calibration.py or normal.py, then flash.py before collecting this batch.")
-        antenna = int(_definition(source, "GENIE_TEST_ANTENNA", header), 0) if count == 1 else None
-        if count == 1 and antenna not in (1, 2):
-            raise ValueError("Select physical ANT1 or ANT2 for isolated calibration.")
-        kind = _definition(source, "SL_RAIL_UTIL_CS_ANTENNA_CONFIG_TYPE", header)
-        kinds = {f"SL_RAIL_UTIL_CS_ANTENNA_OFFSET_CONFIG_TYPE_{name.upper()}": name
-                 for name in ("wireless", "wired")}
-        if kind not in kinds:
-            raise ValueError(f"Unknown antenna offset configuration in {header}.")
-        if kinds[kind] != "wireless":
-            raise ValueError("Guided distance calibration requires wireless antenna offsets on both boards.")
-        values = {"project": project, "physical_antenna": antenna,
-                  "available_antennas": count, "aox_control_pins": pins,
-                  "offset_config_type": kinds[kind]}
-        for connection in ("wireless", "wired"):
-            offsets = [int(_definition(source, f"GENIE_ANT{number}_{connection.upper()}_OFFSET_CM",
-                                       header), 0) for number in (1, 2)]
-            if any(not -32768 <= value <= 32767 for value in offsets):
-                raise ValueError(f"An antenna offset exceeds the firmware range in {header}.")
-            array = _definition(source, f"SL_RAIL_UTIL_CS_ANTENNA_OFFSET_{connection.upper()}_CM", header)
-            elements = [value.strip() for value in array.strip("{} ").split(",")]
-            allowed = [{f"GENIE_ANT{number}_{connection.upper()}_OFFSET_CM", str(value)}
-                       for number, value in enumerate(offsets, 1)]
-            if count == 1:
-                allowed = [allowed[antenna - 1] | {f"GENIE_SELECTED_{connection.upper()}_OFFSET_CM"}, {"0"}]
-            if (len(elements) != 4 or elements[0] not in allowed[0]
-                    or elements[1] not in allowed[1] or elements[2:] != ["0", "0"]):
-                raise ValueError(f"The applied {connection} offset array disagrees with the selected antenna in {header}.")
-            values[f"{connection}_offsets_cm"] = [*offsets, 0, 0]
-        projects[role] = values
-    if len({values["available_antennas"] for values in projects.values()}) != 1:
-        raise ValueError("Select the same firmware mode on both boards with calibration.py or normal.py, then flash.py.")
-    mode = "isolated" if count == 1 else "normal"
-    if mode == "isolated" and len({values["physical_antenna"] for values in projects.values()}) != 1:
-        raise ValueError("Select the same physical antenna on both boards for guided calibration.")
-    snapshot = {"mode": mode, "projects": projects}
-    snapshot["fingerprint"] = hashlib.sha256(
-        json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-    return snapshot
 
 
 def save_progress(path, progress):
@@ -609,7 +547,7 @@ def choose_batch(snapshot, live_dir, calibration_dir):
             managed = True
             for index, (path, progress) in enumerate(batches, 1):
                 different = " (different antenna/settings)" if index not in compatible else ""
-                print(f"{index}. {_batch_folder(path).name} — {len(progress['completed_conditions'])}/40 complete, "
+                print(f"{index}. {_batch_folder(path).name} â€” {len(progress['completed_conditions'])}/40 complete, "
                       f"rotate {progress['rotated_board']}{different}", flush=True)
             default = str(compatible[0]) if compatible else "new"
             choice = input(f"Resume batch [Enter = {default}], new, delete NUMBER, or done? ").strip().casefold() or default
@@ -645,7 +583,7 @@ def show_status(progress):
     for distance in DISTANCES:
         missing = [str(angle) for angle in ANGLES if f"{distance:g}m_{angle:g}deg" not in completed]
         detail = ", ".join(missing) if missing else "all complete"
-        print(f"{distance:g} m — {8 - len(missing)}/8 complete. Pending yaw {detail}", flush=True)
+        print(f"{distance:g} m â€” {8 - len(missing)}/8 complete. Pending yaw {detail}", flush=True)
 
 
 def _prompt_trial(progress):

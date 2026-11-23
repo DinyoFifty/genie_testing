@@ -1,5 +1,6 @@
 """Select live runs and fit measured distance against tape distance."""
 
+import argparse
 import csv
 from collections import defaultdict
 from dataclasses import dataclass
@@ -36,6 +37,8 @@ class Run:
     yaw: tuple
     issue: str = ""
     calibration: dict | None = None
+    firmware: dict | None = None
+    simulated: bool = False
 
 
 @dataclass
@@ -62,8 +65,10 @@ def find_runs(live_dir):
                         for board in ("initiator", "reflector"))
             yaw = tuple(angle % 360 if finite(angle) else None for angle in yaw)
             calibration = summary.get("calibration")
+            firmware = summary.get("firmware")
+            simulated = summary.get("simulated") is True
             if not finite(actual_m) or actual_m < 0:
-                runs.append(Run(folder, None, yaw, "Tape distance missing", calibration))
+                runs.append(Run(folder, None, yaw, "Tape distance missing", calibration, firmware, simulated))
             else:
                 issue = ""
                 if calibration is not None:
@@ -71,7 +76,9 @@ def find_runs(live_dir):
                         issue = "Guided metadata unavailable"
                     elif not guided_trial_complete(summary):
                         issue = "Incomplete guided trial"
-                runs.append(Run(folder, actual_m, yaw, issue, calibration))
+                    elif firmware is not None and firmware != calibration.get("firmware"):
+                        issue = "Capture and guided firmware metadata disagree"
+                runs.append(Run(folder, actual_m, yaw, issue, calibration, firmware, simulated))
         except READ_ERRORS:
             runs.append(Run(folder, None, (None, None), "Tape distance unavailable"))
     return runs
@@ -86,23 +93,30 @@ def guided_trial_complete(summary):
 
 
 def calibration_baseline(runs):
-    """Use the offsets saved with guided captures, including after firmware edits."""
+    """Read capture-time settings for guided and single trials, never today's headers."""
     usable = [run for run in runs if not run.issue]
-    guided = [run for run in usable if run.calibration is not None]
-    if not guided:
+    if len({run.simulated for run in usable}) > 1:
+        raise ValueError("Select simulated and real measurements separately.")
+    captured = [run for run in usable if run.calibration is not None or run.firmware is not None]
+    if not captured:
         return None
-    if len(guided) != len(usable):
-        raise ValueError("Select guided folders together. Analyze older folders separately.")
+    if len(captured) != len(usable):
+        raise ValueError("Select folders with captured settings together. Analyze older folders separately.")
     baselines = []
     batches = set()
-    for run in guided:
+    for run in captured:
         try:
-            metadata = run.calibration
-            firmware = metadata["firmware"]
+            firmware = run.firmware
+            if run.calibration is not None:
+                metadata = run.calibration
+                firmware = metadata["firmware"]
+                batch = metadata["batch_id"]
+                if not isinstance(batch, str) or not batch:
+                    raise ValueError
+                batches.add(batch)
             projects = firmware["projects"]
-            batch = metadata["batch_id"]
             mode = firmware["mode"]
-            if mode not in ("isolated", "normal") or not isinstance(batch, str) or not batch:
+            if mode not in ("isolated", "normal"):
                 raise ValueError
             count = 1 if mode == "isolated" else 2
             values, antennas = [], []
@@ -126,14 +140,32 @@ def calibration_baseline(runs):
             if antennas[0] != antennas[1]:
                 raise ValueError
             baselines.append((mode, antennas[0], tuple(values), json.dumps(firmware, sort_keys=True)))
-            batches.add(batch)
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"{run.folder.name} has incomplete calibration baseline metadata.") from error
     if any(baseline != baselines[0] for baseline in baselines[1:]):
         raise ValueError("Selected folders use different antennas or firmware baselines. Select one baseline together.")
     mode, antenna, offsets, _ = baselines[0]
     return {"mode": mode, "pair": ANTENNA_PAIRS[antenna - 1] if mode == "isolated" else None,
-            "offsets": offsets, "batches": sorted(batches)}
+            "offsets": offsets, "batches": sorted(batches), "simulated": captured[0].simulated}
+
+
+def capture_configuration(run):
+    firmware = run.calibration.get("firmware") if isinstance(run.calibration, dict) else run.firmware
+    if firmware is None:
+        return "Unknown - older recording"
+    try:
+        projects = firmware["projects"]
+        if firmware["mode"] == "normal":
+            values = ["/".join(map(str, projects[role]["wireless_offsets_cm"][:2]))
+                      for role in ("initiator", "reflector")]
+            return f"Dual - Ini {values[0]} / Ref {values[1]} cm"
+        antenna = projects["initiator"]["physical_antenna"]
+        if type(antenna) is not int or antenna not in (1, 2):
+            raise ValueError
+        values = [projects[role]["wireless_offsets_cm"][antenna - 1] for role in ("initiator", "reflector")]
+        return f"ANT{antenna}-ANT{antenna} - Ini {values[0]} / Ref {values[1]} cm"
+    except (KeyError, TypeError, IndexError, ValueError):
+        return "Configuration unavailable"
 
 
 def filtered_readings(rows, headers):
@@ -277,7 +309,10 @@ def offset_text(offsets):
 def show_result(root, actual, measured, board_pairs, skipped, baseline=None):
     normal = baseline is not None and baseline.get("mode") == "normal"
     single_distance = len(set(actual)) == 1
-    title = "Genie repeated-distance analysis" if single_distance else "Genie distance regression"
+    title = ("Genie accuracy check" if normal else
+             "Genie repeated-distance analysis" if single_distance else "Genie distance regression")
+    if baseline and baseline.get("simulated"):
+        title += " - SIMULATED"
     fit = distance_fit(actual, measured)
     window = tk.Toplevel(root)
     window.title(title)
@@ -316,9 +351,9 @@ def show_result(root, actual, measured, board_pairs, skipped, baseline=None):
     controls.pack(side="bottom", fill="x")
     if baseline:
         pair_label = "ANT1 + ANT2" if normal else baseline["pair"]
-        ttk.Label(controls, text=f"{pair_label} · Captured firmware offsets").pack(side="left")
+        ttk.Label(controls, text=f"{pair_label} · Saved capture configuration").pack(side="left")
     else:
-        ttk.Label(controls, text="Calibration antenna pair").pack(side="left")
+        ttk.Label(controls, text="Legacy recording: confirm antenna pair").pack(side="left")
         pair_box = ttk.Combobox(controls, values=("Accuracy check", *ANTENNA_PAIRS),
                                 state="readonly", width=16)
         pair_box.current(0)
@@ -362,7 +397,7 @@ def show_result(root, actual, measured, board_pairs, skipped, baseline=None):
         panel.text(0, 0.89, heading, transform=transform,
                    weight="bold", fontsize=11)
         panel.text(0, 0.80, fit_text, transform=transform, va="top", fontsize=10)
-        offset_label = "Captured wireless offsets (cm)" if baseline else "Old wireless offsets (cm)"
+        offset_label = "Captured wireless offsets (cm)" if baseline else "Current project offsets (cm)"
         panel.text(0, 0.60, offset_label, transform=transform,
                    weight="bold", fontsize=11)
         panel.text(0, 0.54, offset_text(old), transform=transform, va="top", fontsize=10)
@@ -375,7 +410,8 @@ def show_result(root, actual, measured, board_pairs, skipped, baseline=None):
             panel.text(0, 0.31, offset_text(new), transform=transform, va="top", fontsize=10)
         panel.text(0, 0.19 if new else 0.31, detail, transform=transform, va="top", fontsize=9)
         if baseline:
-            panel.text(0, 0.02, "Batch " + ", ".join(baseline["batches"]),
+            provenance = "Batch " + ", ".join(baseline["batches"]) if baseline["batches"] else "Single-trial capture configuration"
+            panel.text(0, 0.02, provenance,
                        transform=transform, va="bottom", fontsize=8, wrap=True)
         canvas.draw_idle()
 
@@ -386,35 +422,42 @@ def show_result(root, actual, measured, board_pairs, skipped, baseline=None):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("folder", nargs="?", type=Path, default=PROJECT_DATA / "live",
+                        help="Live folder or guided batch to analyze; defaults to this project's live results.")
+    live_dir = parser.parse_args().folder
     root = tk.Tk()
     root.title("Select Genie folders for linear regression")
-    root.geometry("930x430")
-    root.minsize(740, 330)
+    root.geometry("1130x430")
+    root.minsize(940, 330)
     frame = ttk.Frame(root, padding=14)
     frame.pack(fill="both", expand=True)
     ttk.Label(frame, text="Select live folders to analyze together. Use Ctrl or Shift to select multiple.").pack(
         anchor="w", pady=(0, 8))
     table_frame = ttk.Frame(frame)
     table_frame.pack(fill="both", expand=True)
-    tree = ttk.Treeview(table_frame, columns=("folder", "tape", "batch", "status"),
+    tree = ttk.Treeview(table_frame, columns=("folder", "tape", "batch", "configuration", "status"),
                         show="headings", selectmode="extended")
     scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
     tree.configure(yscrollcommand=scrollbar.set)
     for key, heading, width in (
-        ("folder", "Live folder", 265), ("tape", "Tape distance (m)", 112),
-        ("batch", "Guided batch", 220),
-        ("status", "Status", 210),
+        ("folder", "Live folder", 200), ("tape", "Tape distance (m)", 112),
+        ("batch", "Guided batch", 180),
+        ("configuration", "Saved configuration", 310), ("status", "Status", 180),
     ):
         tree.heading(key, text=heading)
         tree.column(key, width=width, anchor="w")
     scrollbar.pack(side="right", fill="y")
     tree.pack(fill="both", expand=True)
-    runs = find_runs(PROJECT_DATA / "live")
+    runs = find_runs(live_dir)
     for index, run in enumerate(runs):
         tape = "" if run.actual_m is None else f"{run.actual_m:g}"
         batch = (run.calibration.get("batch_name", run.calibration.get("batch_id", ""))
                  if isinstance(run.calibration, dict) else "")
-        tree.insert("", "end", iid=str(index), values=(run.folder.name, tape, batch, run.issue or "Ready"))
+        status = run.issue or "Ready"
+        if run.simulated:
+            status = "SIMULATED - " + status
+        tree.insert("", "end", iid=str(index), values=(run.folder.name, tape, batch, capture_configuration(run), status))
 
     def fit_selection():
         selected = [runs[int(index)] for index in tree.selection()]

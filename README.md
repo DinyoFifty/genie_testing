@@ -112,7 +112,9 @@ For a full calibration batch, select the 40 completed trials for one physical an
 
 Repeated trials at one distance provide a constant-bias estimate with an assumed slope of 1. Multiple distances let the fit estimate slope and intercept.
 
-Guided isolated-antenna captures supply the saved antenna and offset baseline for recommendations. Normal-mode captures support accuracy plots and regression.
+Single trials recorded through the Analyzer launcher, and guided trials, save their antenna mode and offsets with the capture. Regression uses those saved settings automatically, including after you change the current project configuration. ANT1 or ANT2 captures produce isolated-antenna recommendations; normal dual-antenna captures open an accuracy check. Select trials with the same configuration together. Older captures and replayed logs without saved settings still require manual confirmation.
+
+These settings come from the project configuration when recording starts. Flash both boards after changes; the readings do not identify which firmware was actually flashed.
 
 Apply physical calibration recommendations to the headers, flash both boards, and collect fresh measurements to check the result. After calibrating ANT1 and ANT2, run [normal.py](normal.py), flash both boards, and proceed with dual-antenna testing.
 
