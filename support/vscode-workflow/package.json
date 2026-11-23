@@ -2,23 +2,29 @@
   "name": "genie-files-manager",
   "displayName": "Genie Files",
   "description": "Quick access to the Genie workflow and antenna offset headers.",
-  "version": "1.2.0",
+  "version": "1.4.5",
   "publisher": "local-genie",
   "engines": {
     "vscode": "^1.74.0"
   },
   "main": "./extension.js",
-  "activationEvents": ["onView:genie.files.manager"],
+  "activationEvents": ["onStartupFinished", "onView:genie.files.manager"],
   "contributes": {
     "views": {
       "explorer": [
         {
           "id": "genie.files.manager",
-          "name": "Genie Files"
+          "name": "Genie Files",
+          "when": "genieFilesManager.project"
         }
       ]
     },
     "commands": [
+      {
+        "command": "genieFilesManager.prepareLayout",
+        "title": "Genie Files: Restore Testing Layout",
+        "enablement": "genieFilesManager.project"
+      },
       {
         "command": "genieFilesManager.reveal",
         "title": "Reveal in Explorer"

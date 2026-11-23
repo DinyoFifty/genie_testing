@@ -17,6 +17,8 @@ Using the command line tool included with Simplicity Installer, setup installs m
 
 Setup also creates or repairs the project's local Python environment, installs and checks the Python dependencies, installs the Python, Pylance, Python Debugger, C/C++, and Genie Files extensions, refreshes SDK and compiler paths, and opens [genie_testing.code-workspace](genie_testing.code-workspace). Run setup again after moving the project or pulling updates. It reuses the tools and extensions already installed. These installation scripts support Windows.
 
+**Genie Files** opens first at the top of Explorer. **Outline** and **Timeline** start hidden, and the regular project folders start collapsed. VS Code refreshes once on first open to apply this layout. To restore it later, run **Genie Files: Restore Testing Layout** from the command palette.
+
 If setup fails, send the complete error and [data/setup/setup.log](data/setup/setup.log). Once Python starts, [data/setup/setup-report.json](data/setup/setup-report.json) also records the failed stage, discovered tool paths, and checked package versions. Both files stay local and are excluded from Git and the teammate ZIP.
 
 If VS Code asks, trust your extracted project and select its `.venv\Scripts\python.exe` with **Python > Select Interpreter**. Use **Run Python File** for the scripts below. The commands below also work directly in the terminal. Restart VS Code if a newly installed extension requests it.
@@ -92,7 +94,11 @@ The checklist has 40 conditions, covering 1, 2, 5, 10, and 20 m at eight orienta
 
 Each completed trial uses the first 100 finite filtered distance estimates. Its raw capture retains the complete received stream. Interrupted trials save their collected readings and remain pending.
 
-Progress is stored under [data/calibration/](data/calibration/) as batches are created. Saved board identities, antenna mode, offsets, and setup distinguish compatible batches.
+Guided batches live under [data/live/guided/](data/live/guided/), with names like `Trial1_ANT1-ANT1_2026-11-22_3-44PM` or `Trial2_DUAL_2026-11-22_4-10PM`. Each condition has a folder such as `1m_Ini0_Ref45`. Expand it in Genie Files to see the recording time, workbook, plots, and capture files. Progress is saved inside the batch. Older guided batches are grouped here automatically when you next open guided collection.
+
+To redo a condition, enter the same distance and board yaws. A completed retry replaces that condition's previous result and sends the old folder to the Recycle Bin. Interrupted retries keep the previous completed result and save their partial capture under `Interrupted captures`.
+
+Delete a batch with **Genie Files > Guided batches > right-click the batch > Delete**, or enter `delete NUMBER` in the guided batch menu. This removes its captures and saved progress together. Stop an active guided session before deleting its batch. Saved board identities, antenna mode, offsets, and setup distinguish compatible batches.
 
 ### 5. Analyze the trials
 
@@ -112,7 +118,7 @@ Apply physical calibration recommendations to the headers, flash both boards, an
 
 ## Find the results
 
-Each trial appears in [data/live/](data/live/) under a name such as `2026-11-21_4-14PM`.
+Single trials appear directly in [data/live/](data/live/) under a name such as `2026-11-21_4-14PM`. Guided trials use the named condition folders inside their batch under [data/live/guided/](data/live/guided/).
 
 | Output | Purpose |
 | --- | --- |

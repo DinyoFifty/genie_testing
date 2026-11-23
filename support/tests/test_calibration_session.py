@@ -17,7 +17,7 @@ class GuidedCalibrationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.live = self.root / "data" / "live"
-        self.path = self.root / "data" / "calibration" / "batch" / "progress.json"
+        self.path = self.live / "guided" / "batch" / "progress.json"
         self.snapshot = {"mode": "isolated", "fingerprint": "baseline", "projects": {
             role: {"project": project, "physical_antenna": 1, "available_antennas": 1,
                    "aox_control_pins": 0, "offset_config_type": "wireless",
@@ -78,7 +78,7 @@ class GuidedCalibrationTests(unittest.TestCase):
         normal = self.normal_snapshot()
         normal_progress = {**copy.deepcopy(self.progress), "batch_id": "normal-batch", "firmware": normal,
                            "attempts": [], "completed_conditions": []}
-        with patch("support.genie_calibration._new_progress", return_value=normal_progress) as create:
+        with patch("support.genie_calibration._new_progress", return_value=normal_progress) as create, patch("builtins.input", return_value=""):
             normal_path, _ = guided.choose_batch(normal, self.live, self.path.parent.parent)
         create.assert_called_once()
         self.save_trial(20, 90, progress=normal_progress, path=normal_path)
@@ -222,10 +222,10 @@ class GuidedCalibrationTests(unittest.TestCase):
         self.assertFalse(self.progress["completed_conditions"])
         self.assertEqual(self.progress["attempts"][0]["status"], "excluded")
         changed = {**self.snapshot, "fingerprint": "changed"}
-        with patch("support.genie_calibration._new_progress", return_value={**self.progress, "batch_id": "new-batch"}) as new:
+        with patch("support.genie_calibration._new_progress", return_value={**self.progress, "batch_id": "new-batch"}) as new, patch("builtins.input", return_value=""):
             path, _ = guided.choose_batch(changed, self.live, self.path.parent.parent)
         new.assert_called_once()
-        self.assertEqual(path.parent.name, "new-batch")
+        self.assertTrue(path.parent.name.startswith("Trial1_ANT1-ANT1_"))
 
     def test_captured_offset_values_must_match_even_if_fingerprint_is_copied(self):
         session, summary = self.save_trial(1, 0)

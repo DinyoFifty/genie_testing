@@ -18,6 +18,7 @@ from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
 from support.genie_live import PROJECT_DATA, finite, workbook_distance
+from support.trial_storage import trial_folders
 
 
 FIRMWARE_ROOT = Path(__file__).resolve().parent / "firmware"
@@ -47,9 +48,7 @@ def find_runs(live_dir):
     if not live_dir.is_dir():
         return []
     runs = []
-    for folder in sorted(live_dir.iterdir(), reverse=True):
-        if not folder.is_dir():
-            continue
+    for folder in sorted(trial_folders(live_dir), reverse=True):
         summary_path = folder / "capture" / "summary.json"
         if not summary_path.is_file():
             summary_path = folder / "summary.json"
@@ -413,7 +412,8 @@ def main():
     runs = find_runs(PROJECT_DATA / "live")
     for index, run in enumerate(runs):
         tape = "" if run.actual_m is None else f"{run.actual_m:g}"
-        batch = run.calibration.get("batch_id", "") if isinstance(run.calibration, dict) else ""
+        batch = (run.calibration.get("batch_name", run.calibration.get("batch_id", ""))
+                 if isinstance(run.calibration, dict) else "")
         tree.insert("", "end", iid=str(index), values=(run.folder.name, tape, batch, run.issue or "Ready"))
 
     def fit_selection():

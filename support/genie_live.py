@@ -81,9 +81,12 @@ def finite(value):
 
 
 def last_board_heights(out):
+    from .trial_storage import trial_folders
+
     latest_heights = {}
     latest_saved_at = -1
-    for path in Path(out).glob("*/capture/summary.json"):
+    for session in trial_folders(out):
+        path = session / "capture/summary.json"
         try:
             saved_at = path.stat().st_mtime_ns
             if saved_at <= latest_saved_at:

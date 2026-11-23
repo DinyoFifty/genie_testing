@@ -12,6 +12,8 @@ from uuid import uuid4
 
 from flash import FIRMWARE, PROJECTS
 from .genie_live import analyzer_session, finite, last_board_heights, run_live
+from .trial_storage import (batch_active, condition_name, linked, local_timestamp,
+                            recycle_folder, trial_folders)
 
 
 DISTANCES = (1, 2, 5, 10, 20)
@@ -111,6 +113,7 @@ def _batch_lock(path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as stream:
+        marker = path.with_name("progress.active.json")
         if os.name == "nt":
             import msvcrt
 
@@ -123,8 +126,10 @@ def _batch_lock(path):
             except OSError:
                 raise RuntimeError("This guided batch is already open in another Genie process.") from None
             try:
+                marker.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
                 yield
             finally:
+                marker.unlink(missing_ok=True)
                 stream.seek(0)
                 msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
         else:
@@ -132,8 +137,10 @@ def _batch_lock(path):
 
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             try:
+                marker.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
                 yield
             finally:
+                marker.unlink(missing_ok=True)
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
@@ -166,7 +173,7 @@ def _board_pair(value):
     return None
 
 
-def _apply_summary(progress, summary, session):
+def _apply_summary(progress, summary, session, live_dir=None):
     metadata = summary.get("calibration")
     if not isinstance(metadata, dict) or metadata.get("batch_id") != progress["batch_id"]:
         return
@@ -182,7 +189,8 @@ def _apply_summary(progress, summary, session):
     count = summary.get("finite_filtered_estimate_count")
     count = count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 0
     session = Path(session)
-    attempt.update({"live_folder": session.name, "actual_distance_m": summary.get("actual_distance_m"),
+    live_folder = session.relative_to(live_dir).as_posix() if live_dir is not None else session.name
+    attempt.update({"live_folder": live_folder, "actual_distance_m": summary.get("actual_distance_m"),
                     "conditions": conditions, "finite_filtered_estimate_count": count,
                     "user_stopped": summary.get("user_stopped") is True,
                     "condition": condition_key(progress, summary.get("actual_distance_m"), conditions),
@@ -231,7 +239,8 @@ def recover_progress(progress, live_dir):
         if attempt.get("live_folder") and attempt.get("status") in ("complete", "extra", "incomplete"):
             attempt.update(status="incomplete", detail="Saved capture summary is unavailable.")
     summaries = []
-    for path in Path(live_dir).glob("*/capture/summary.json"):
+    for session in trial_folders(live_dir, include_temporary=True):
+        path = session / "capture/summary.json"
         try:
             summary = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
@@ -243,7 +252,7 @@ def recover_progress(progress, live_dir):
             started = metadata.get("started_at_utc") or summary.get("session_started_at_utc") or ""
             summaries.append((str(started), path.parent.parent, summary))
     for _, session, summary in sorted(summaries, key=lambda item: (item[0], item[1].name)):
-        _apply_summary(progress, summary, session)
+        _apply_summary(progress, summary, session, Path(live_dir))
     _refresh_completed(progress)
     return progress
 
@@ -259,6 +268,7 @@ def begin_attempt(progress, path, distance, conditions):
                                  "detail": "Recording has not been finalized."})
     save_progress(path, progress)
     return {key: progress[key] for key in ("batch_id", "firmware", "rotated_board", "fixed_yaw_deg", "setup")} | {
+        "batch_name": progress.get("batch_name", progress["batch_id"]),
         "attempt_id": attempt_id, "started_at_utc": started}
 
 
@@ -304,9 +314,7 @@ def _new_progress(snapshot, live_dir):
     if notes and notes.casefold() != "skip":
         setup["setup_notes"] = notes
     now = datetime.now(timezone.utc)
-    pair = ("normal-dual" if snapshot["mode"] == "normal" else
-            "-".join(f"ANT{snapshot['projects'][role]['physical_antenna']}" for role in PROJECTS))
-    return {"version": PROGRESS_VERSION, "batch_id": f"{now:%Y-%m-%d_%H-%M-%S}_{pair}_{uuid4().hex[:8]}",
+    return {"version": PROGRESS_VERSION, "batch_id": uuid4().hex,
             "created_at_utc": now.isoformat(), "firmware": snapshot, "rotated_board": rotated,
             "fixed_yaw_deg": fixed_yaw, "setup": setup, "board_pair": None,
             "attempts": [], "completed_conditions": []}
@@ -328,43 +336,219 @@ def _load_progress(path):
     return progress
 
 
-def choose_batch(snapshot, live_dir, calibration_dir):
-    compatible = []
-    for path in sorted(Path(calibration_dir).glob("*/progress.json"), reverse=True):
+def _create_batch_folder(progress, live_dir):
+    guided = Path(live_dir) / "guided"
+    guided.mkdir(parents=True, exist_ok=True)
+    numbers = [int(match[1]) for path in guided.iterdir()
+               if (match := re.match(r"Trial(\d+)_", path.name))]
+    number = max(numbers, default=0) + 1
+    snapshot = progress["firmware"]
+    pair = ("DUAL" if snapshot["mode"] == "normal" else
+            "-".join(f"ANT{snapshot['projects'][role]['physical_antenna']}" for role in PROJECTS))
+    stamp = local_timestamp(progress["created_at_utc"])
+    while True:
+        path = guided / f"Trial{number}_{pair}_{stamp}"
+        try:
+            path.mkdir()
+        except FileExistsError:
+            number += 1
+        else:
+            return path
+
+
+def _retire_capture(folder):
+    try:
+        recycle_folder(folder)
+    except OSError as error:
+        print(f"The replaced result is retained at {folder}: {error}", flush=True)
+
+
+def publish_trial(progress, path, session, live_dir, *, recovering=False):
+    """Promote a finished capture; a failed retry never replaces a completed trial."""
+    session, live_dir = Path(session).resolve(), Path(live_dir).resolve()
+    batch = Path(path).parent.resolve()
+    if not session.is_relative_to(live_dir) or linked(session) or not batch.is_relative_to(live_dir / "guided"):
+        raise ValueError("Guided captures must stay inside this project's live folder.")
+    summary_path = session / "capture/summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    _apply_summary(progress, summary, session, live_dir)
+    attempt_id = summary["calibration"]["attempt_id"]
+    attempt = next(item for item in progress["attempts"] if item["attempt_id"] == attempt_id)
+    name = condition_name(summary.get("actual_distance_m"), summary.get("conditions", {}))
+    complete = attempt["status"] in ("complete", "extra")
+    if complete and "Unknown" in name:
+        # Unspecified conditions cannot establish that two captures are the same test.
+        name += "_" + attempt_id[:8]
+    if complete:
+        target = batch / name
+    else:
+        incomplete = batch / "_incomplete"
+        incomplete.mkdir(exist_ok=True)
+        stamp = local_timestamp(summary.get("session_started_at_utc") or summary["calibration"]["started_at_utc"])
+        target = incomplete / f"{name}_{stamp}_{attempt_id[:8]}"
+    if session == target:
+        return session
+    if target.exists() and not complete:
+        raise ValueError(f"An interrupted capture already exists at {target}.")
+    backup = None
+    if target.exists():
+        if linked(target):
+            raise ValueError("Cannot replace a linked trial folder.")
+        previous = json.loads((target / "capture/summary.json").read_text(encoding="utf-8"))
+        if previous.get("calibration", {}).get("batch_id") != progress["batch_id"]:
+            raise ValueError("The existing condition folder belongs to another batch.")
+        if recovering:
+            def started(value):
+                text = value.get("calibration", {}).get("started_at_utc") or value.get("session_started_at_utc")
+                try:
+                    return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
+                except (AttributeError, ValueError):
+                    return datetime.min.replace(tzinfo=timezone.utc)
+
+            if started(previous) > started(summary):
+                retired = batch / f".replaced-{uuid4().hex}"
+                session.rename(retired)
+                attempt.update(status="superseded", detail="A newer completed result already exists.")
+                _apply_summary(progress, previous, target, live_dir)
+                _refresh_completed(progress)
+                save_progress(path, progress)
+                _retire_capture(retired)
+                return target
+        backup = batch / f".replaced-{uuid4().hex}"
+        target.rename(backup)
+    try:
+        session.rename(target)
+    except BaseException:
+        if backup is not None:
+            backup.rename(target)
+        raise
+    if complete:
+        for older in progress["attempts"]:
+            if (older["attempt_id"] != attempt_id and older.get("status") in ("complete", "extra")
+                    and condition_name(older.get("actual_distance_m"), older.get("conditions", {})) == name):
+                older.update(status="superseded", detail="Replaced by a completed retry.")
+    summary["calibration"]["batch_name"] = progress.get("batch_name", batch.name)
+    save_progress(target / "capture/summary.json", summary)
+    _apply_summary(progress, summary, target, live_dir)
+    _refresh_completed(progress)
+    save_progress(path, progress)
+    if backup is not None:
+        _retire_capture(backup)
+    return target
+
+
+def organize_batch(progress, path, live_dir):
+    """Group old flat captures and recover captures interrupted during publication."""
+    captures = []
+    for session in trial_folders(live_dir, include_temporary=True):
+        try:
+            summary = json.loads((session / "capture/summary.json").read_text(encoding="utf-8"))
+            metadata = summary.get("calibration")
+            if isinstance(metadata, dict) and metadata.get("batch_id") == progress["batch_id"]:
+                captures.append((metadata.get("started_at_utc", ""), session))
+        except (OSError, ValueError, AttributeError):
+            continue
+    for _, session in sorted(captures, key=lambda item: (item[0], str(item[1]))):
+        publish_trial(progress, path, session, live_dir, recovering=True)
+    recover_progress(progress, live_dir)
+    save_progress(path, progress)
+    pending = Path(path).parent / ".pending"
+    if pending.is_dir() and not any(pending.iterdir()):
+        pending.rmdir()
+
+
+def migrate_batches(live_dir, calibration_dir):
+    """Bring legacy progress and its recordings together without changing raw data."""
+    guided = Path(live_dir).resolve() / "guided"
+    legacy = Path(calibration_dir).resolve()
+    if legacy == guided:
+        return
+    for path in sorted(legacy.glob("*/progress.json")):
+        if linked(path.parent) or batch_active(path.parent):
+            continue
         try:
             progress = _load_progress(path)
         except (OSError, ValueError):
             print(f"Could not read saved guided progress in {path.parent.name}.", flush=True)
             continue
-        if progress["firmware"] == snapshot:
-            recover_progress(progress, live_dir)
-            compatible.append((path, progress))
-    if compatible:
-        for index, (_, progress) in enumerate(compatible, 1):
-            completed = len(progress["completed_conditions"])
-            print(f"{index}. {progress['batch_id']} — {completed}/40 complete, "
-                  f"rotate {progress['rotated_board']}", flush=True)
-        while True:
-            choice = input("Resume batch number [Enter = 1], new, or done? ").strip().casefold()
-            if choice == "done":
-                return None
-            if choice == "new":
-                break
-            if not choice:
-                choice = "1"
-            if choice.isdigit() and 1 <= int(choice) <= len(compatible):
-                return compatible[int(choice) - 1]
-            print("Choose a displayed batch number, new, or done.", flush=True)
-    progress = _new_progress(snapshot, live_dir)
-    path = Path(calibration_dir) / progress["batch_id"] / "progress.json"
-    save_progress(path, progress)
-    return path, progress
+        with _batch_lock(path.with_name("progress.lock")):
+            target = _create_batch_folder(progress, live_dir)
+        target.rmdir()
+        path.parent.rename(target)
+        path = target / "progress.json"
+        progress["batch_name"] = target.name
+        with _batch_lock(path.with_name("progress.lock")):
+            organize_batch(progress, path, live_dir)
+
+
+def delete_batch(path, live_dir):
+    path = Path(path).resolve()
+    guided = (Path(live_dir) / "guided").resolve()
+    if path.parent.parent != guided or linked(path.parent):
+        raise ValueError("Select one guided batch inside data/live/guided.")
+    if batch_active(path.parent):
+        raise RuntimeError("This batch is recording. Stop its guided session before deleting it.")
+    with _batch_lock(path.with_name("progress.lock")):
+        pass
+    recycle_folder(path.parent)
+
+
+def choose_batch(snapshot, live_dir, calibration_dir):
+    migrate_batches(live_dir, calibration_dir)
+    guided = Path(live_dir) / "guided"
+    managed = False
+    while True:
+        batches = []
+        for path in sorted(guided.glob("*/progress.json"), reverse=True):
+            try:
+                progress = _load_progress(path)
+                recover_progress(progress, live_dir)
+            except (OSError, ValueError):
+                print(f"Could not read saved guided progress in {path.parent.name}.", flush=True)
+                continue
+            batches.append((path, progress))
+        batches.sort(key=lambda item: item[1].get("created_at_utc", ""), reverse=True)
+        compatible = [index for index, (_, progress) in enumerate(batches, 1) if progress["firmware"] == snapshot]
+        if not batches:
+            choice = (input("No saved batches. Enter new or done [Enter = new]? ").strip().casefold() or "new"
+                      if managed else "new")
+        else:
+            managed = True
+            for index, (path, progress) in enumerate(batches, 1):
+                different = " (different antenna/settings)" if index not in compatible else ""
+                print(f"{index}. {path.parent.name} — {len(progress['completed_conditions'])}/40 complete, "
+                      f"rotate {progress['rotated_board']}{different}", flush=True)
+            default = str(compatible[0]) if compatible else "new"
+            choice = input(f"Resume batch [Enter = {default}], new, delete NUMBER, or done? ").strip().casefold() or default
+        if choice == "done":
+            return None
+        if choice == "new":
+            progress = _new_progress(snapshot, live_dir)
+            batch = _create_batch_folder(progress, live_dir)
+            progress["batch_name"] = batch.name
+            path = batch / "progress.json"
+            save_progress(path, progress)
+            return path, progress
+        if choice.startswith("delete "):
+            number = choice[7:].strip()
+            if number.isdigit() and 1 <= int(number) <= len(batches):
+                path, _ = batches[int(number) - 1]
+                confirm = input(f"Move {path.parent.name} and all its trials to the Recycle Bin? [y/N] ").strip().casefold()
+                if confirm in ("y", "yes"):
+                    try:
+                        delete_batch(path, live_dir)
+                    except (OSError, RuntimeError, ValueError) as error:
+                        print(f"Could not delete batch: {error}", flush=True)
+                continue
+        if choice.isdigit() and int(choice) in compatible:
+            return batches[int(choice) - 1]
+        print("Choose a compatible batch, new, delete NUMBER, or done.", flush=True)
 
 
 def show_status(progress):
     completed = set(progress["completed_conditions"])
     print(f"Guided progress {len(completed)}/40 planned conditions complete. "
-          f"{len(progress['attempts'])} attempts retained.", flush=True)
+          f"{len(progress['attempts'])} capture attempts.", flush=True)
     for distance in DISTANCES:
         missing = [str(angle) for angle in ANGLES if f"{distance:g}m_{angle:g}deg" not in completed]
         detail = ", ".join(missing) if missing else "all complete"
@@ -402,6 +586,9 @@ def _prompt_trial(progress):
             conditions[f"{role}_yaw_deg"] = yaw
     if condition_key(progress, distance, conditions) is None:
         print("This condition will be saved as an extra trial outside the 40 planned points.", flush=True)
+    elif condition_key(progress, distance, conditions) in progress["completed_conditions"]:
+        print("Retrying a completed condition. A successful capture replaces its previous result; "
+              "an interrupted capture keeps the previous result.", flush=True)
     while True:
         action = input("Press Enter to record 100 filtered estimates, or enter status/done. ").strip().casefold()
         if not action:
@@ -426,6 +613,8 @@ def run_guided(folder, out, *, plot=True, interval=0.5):
     path, _ = selected
     with _batch_lock(path.with_name("progress.lock")), ExitStack() as connections:
         progress = recover_progress(_load_progress(path), live_dir)
+        progress.setdefault("batch_name", path.parent.name)
+        organize_batch(progress, path, live_dir)
         save_progress(path, progress)
         mode_label = "Normal dual-antenna testing" if snapshot["mode"] == "normal" else "Isolated-antenna calibration"
         print(mode_label, flush=True)
@@ -459,9 +648,10 @@ def run_guided(folder, out, *, plot=True, interval=0.5):
                     print("Firmware settings changed while connecting. Progress is saved. Start a new batch after flashing.", flush=True)
                     break
                 capture = client.start(max_estimates=ESTIMATE_TARGET)
-                session = run_live(folder=folder, out=live_dir, interval=interval, plot=plot,
+                session = run_live(folder=folder, out=path.parent / ".pending", interval=interval, plot=plot,
                                    field="distanceMain", actual_distance=distance, conditions=conditions,
                                    recording=capture, max_estimates=ESTIMATE_TARGET, calibration=metadata)
+                session = publish_trial(progress, path, session, live_dir)
                 recover_progress(progress, live_dir)
                 save_progress(path, progress)
                 attempt = next(item for item in progress["attempts"] if item["attempt_id"] == metadata["attempt_id"])
@@ -478,4 +668,7 @@ def run_guided(folder, out, *, plot=True, interval=0.5):
         finally:
             recover_progress(progress, live_dir)
             save_progress(path, progress)
+            pending = path.parent / ".pending"
+            if pending.is_dir() and not any(pending.iterdir()):
+                pending.rmdir()
     return path
