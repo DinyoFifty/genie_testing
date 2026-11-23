@@ -5,6 +5,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 
@@ -18,6 +19,21 @@ def local_timestamp(value):
     return f"{value:%Y-%m-%d}_{hour}-{value:%M}{period}"
 
 
+def normalize_yaw(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return value % 360
+
+
+def normalize_conditions(conditions):
+    conditions = dict(conditions or {})
+    for key in ("initiator_yaw_deg", "reflector_yaw_deg"):
+        angle = normalize_yaw(conditions.get(key))
+        if angle is not None:
+            conditions[key] = angle
+    return conditions
+
+
 def condition_name(distance, conditions):
     def number(value, *, angle=False):
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -26,6 +42,59 @@ def condition_name(distance, conditions):
 
     return (f"{number(distance)}m_Ini{number(conditions.get('initiator_yaw_deg'), angle=True)}"
             f"_Ref{number(conditions.get('reflector_yaw_deg'), angle=True)}")
+
+
+def create_condition_folder(root, distance, conditions):
+    """Keep repeated single trials separate, using the shared condition format."""
+    root = Path(root)
+    name = condition_name(distance, conditions)
+    number = 1
+    while True:
+        folder = root / (name if number == 1 else f"{name}_{number:02d}")
+        try:
+            folder.mkdir(parents=True)
+        except FileExistsError:
+            number += 1
+        else:
+            return folder
+
+
+def migrate_single_trials(root):
+    """Rename old single captures without changing their readings or metadata."""
+    root = Path(root)
+    if not root.is_dir() or linked(root):
+        return []
+    root = root.resolve()
+    renamed = []
+    for folder in sorted(root.iterdir()):
+        if (not folder.is_dir() or linked(folder) or folder.name == "guided"
+                or folder.name.startswith((".", "_"))):
+            continue
+        try:
+            summary = json.loads((folder / "capture/summary.json").read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(summary, dict) or summary.get("calibration"):
+            continue
+        # A modern capture still recording must keep its current path.
+        if "reports_saved" in summary and not summary["reports_saved"] and summary.get("stop_reason") is None:
+            continue
+        conditions = summary.get("conditions")
+        conditions = conditions if isinstance(conditions, dict) else {}
+        name = condition_name(summary.get("actual_distance_m"), conditions)
+        if re.fullmatch(re.escape(name) + r"(?:_\d{2,})?", folder.name):
+            continue
+        target = create_condition_folder(root, summary.get("actual_distance_m"), conditions)
+        target.rmdir()  # Windows rename requires an unused destination.
+        if folder.resolve().parent != root or target.resolve().parent != root:
+            raise ValueError("Single-trial folders must remain inside their live folder.")
+        try:
+            folder.rename(target)
+        except OSError as error:
+            print(f"Kept {folder.name}; could not rename this capture: {error}", flush=True)
+            continue
+        renamed.append((folder, target))
+    return renamed
 
 
 def linked(path):
@@ -50,7 +119,13 @@ def trial_folders(root, *, include_temporary=False):
 
 
 def batch_active(folder):
-    marker = Path(folder) / "progress.active.json"
+    folder = Path(folder)
+    markers = [folder / name for name in (".progress.active.json", "progress.active.json", "capture/progress.active.json")]
+    markers.extend(folder.glob("*/capture/progress.active.json"))
+    return any(_marker_active(marker) for marker in markers)
+
+
+def _marker_active(marker):
     if not marker.exists():
         return False
     try:

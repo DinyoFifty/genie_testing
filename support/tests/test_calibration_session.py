@@ -17,13 +17,13 @@ class GuidedCalibrationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.live = self.root / "data" / "live"
-        self.path = self.live / "guided" / "batch" / "progress.json"
+        self.path = self.live / "guided" / "Batch1_ANT1-ANT1" / ".progress.json"
         self.snapshot = {"mode": "isolated", "fingerprint": "baseline", "projects": {
             role: {"project": project, "physical_antenna": 1, "available_antennas": 1,
                    "aox_control_pins": 0, "offset_config_type": "wireless",
                    "wireless_offsets_cm": [56, 67, 0, 0], "wired_offsets_cm": [25, 25, 0, 0]}
             for role, project in guided.PROJECTS.items()}}
-        self.progress = {"version": 1, "batch_id": "batch", "created_at_utc": "2026-11-21T00:00:00Z",
+        self.progress = {"version": 1, "batch_id": "batch", "batch_name": "Batch1_ANT1-ANT1", "created_at_utc": "2026-11-21T00:00:00Z",
                          "firmware": self.snapshot, "rotated_board": "reflector", "fixed_yaw_deg": 0,
                          "setup": {"initiator_height_m": 1.5, "reflector_height_m": 1.5},
                          "board_pair": None, "attempts": [], "completed_conditions": []}
@@ -68,7 +68,7 @@ class GuidedCalibrationTests(unittest.TestCase):
         guided.save_progress(self.path, self.progress)
         self.assertEqual(len(self.progress["completed_conditions"]), 40)
         with patch("builtins.input", return_value=""):
-            path, reopened = guided.choose_batch(self.snapshot, self.live, self.path.parent.parent)
+            path, reopened = guided.choose_batch(self.snapshot, self.live, self.live / "guided")
         self.assertEqual(path, self.path)
         self.assertEqual(reopened["firmware"]["mode"], "normal")
         self.assertFalse(guided.pending_conditions(reopened))
@@ -79,12 +79,12 @@ class GuidedCalibrationTests(unittest.TestCase):
         normal_progress = {**copy.deepcopy(self.progress), "batch_id": "normal-batch", "firmware": normal,
                            "attempts": [], "completed_conditions": []}
         with patch("support.genie_calibration._new_progress", return_value=normal_progress) as create, patch("builtins.input", return_value=""):
-            normal_path, _ = guided.choose_batch(normal, self.live, self.path.parent.parent)
+            normal_path, _ = guided.choose_batch(normal, self.live, self.live / "guided")
         create.assert_called_once()
         self.save_trial(20, 90, progress=normal_progress, path=normal_path)
         with patch("builtins.input", return_value=""):
-            _, isolated = guided.choose_batch(self.snapshot, self.live, self.path.parent.parent)
-            _, dual = guided.choose_batch(normal, self.live, self.path.parent.parent)
+            _, isolated = guided.choose_batch(self.snapshot, self.live, self.live / "guided")
+            _, dual = guided.choose_batch(normal, self.live, self.live / "guided")
         self.assertEqual(isolated["completed_conditions"], ["1m_0deg"])
         self.assertEqual(dual["completed_conditions"], ["20m_90deg"])
         self.assertEqual(len(isolated["attempts"]), 1)
@@ -127,7 +127,7 @@ class GuidedCalibrationTests(unittest.TestCase):
         self.assertEqual(guided.pending_conditions(self.progress), [])
         guided.save_progress(self.path, self.progress)
         with patch("builtins.input", return_value=""):
-            path, reopened = guided.choose_batch(self.snapshot, self.live, self.path.parent.parent)
+            path, reopened = guided.choose_batch(self.snapshot, self.live, self.live / "guided")
         self.assertEqual(path, self.path)
         self.assertEqual(len(reopened["completed_conditions"]), 40)
 
@@ -223,9 +223,9 @@ class GuidedCalibrationTests(unittest.TestCase):
         self.assertEqual(self.progress["attempts"][0]["status"], "excluded")
         changed = {**self.snapshot, "fingerprint": "changed"}
         with patch("support.genie_calibration._new_progress", return_value={**self.progress, "batch_id": "new-batch"}) as new, patch("builtins.input", return_value=""):
-            path, _ = guided.choose_batch(changed, self.live, self.path.parent.parent)
+            path, _ = guided.choose_batch(changed, self.live, self.live / "guided")
         new.assert_called_once()
-        self.assertTrue(path.parent.name.startswith("Trial1_ANT1-ANT1_"))
+        self.assertEqual(guided._batch_folder(path).name, "Batch2_ANT1-ANT1")
 
     def test_captured_offset_values_must_match_even_if_fingerprint_is_copied(self):
         session, summary = self.save_trial(1, 0)
@@ -246,21 +246,21 @@ class GuidedCalibrationTests(unittest.TestCase):
 
     def test_compatible_batch_can_be_reopened(self):
         with patch("builtins.input", return_value=""):
-            path, progress = guided.choose_batch(self.snapshot, self.live, self.path.parent.parent)
+            path, progress = guided.choose_batch(self.snapshot, self.live, self.live / "guided")
         self.assertEqual(path, self.path)
         self.assertEqual(progress["batch_id"], "batch")
 
     def test_an_existing_batch_lock_prevents_a_second_writer(self):
-        with guided._batch_lock(self.path.with_name("progress.lock")):
+        with guided._batch_lock(guided._lock_path(self.path)):
             with self.assertRaises((OSError, RuntimeError)):
-                with guided._batch_lock(self.path.with_name("progress.lock")):
+                with guided._batch_lock(guided._lock_path(self.path)):
                     self.fail("A second writer acquired the same batch.")
 
-    def test_prompt_allows_jump_and_manual_signed_yaws(self):
+    def test_prompt_converts_signed_input_to_unsigned_yaw(self):
         with patch("builtins.input", side_effect=["20", "0", "-270", ""]):
             distance, conditions = guided._prompt_trial(self.progress)
         self.assertEqual(distance, 20)
-        self.assertEqual(conditions["reflector_yaw_deg"], -270)
+        self.assertEqual(conditions["reflector_yaw_deg"], 90)
         self.assertEqual(guided.condition_key(self.progress, distance, conditions), "20m_90deg")
 
     def test_prompt_stays_at_jumped_distance_until_its_eight_angles_finish(self):
@@ -294,7 +294,7 @@ class GuidedCalibrationTests(unittest.TestCase):
                   (1.0, {**self.progress["setup"], "initiator_yaw_deg": 0, "reflector_yaw_deg": 0}), "done"]
 
         def record(**kwargs):
-            stored = guided._load_progress(self.path)
+            stored = guided._load_progress(guided._progress_path(guided._batch_folder(self.path)))
             self.assertEqual(stored["attempts"][-1]["status"], "pending")
             self.assertEqual(kwargs["max_estimates"], 100)
             self.assertEqual(kwargs["field"], "distanceMain")
@@ -317,9 +317,13 @@ class GuidedCalibrationTests(unittest.TestCase):
               patch("support.genie_calibration.analyzer_session", return_value=nullcontext(client)) as connect,
               patch("support.genie_calibration.run_live", side_effect=record),
               patch("support.genie_calibration.show_status")):
-            self.assertEqual(guided.run_guided(self.root / "data", self.live, plot=False), self.path)
+            saved_path = guided.run_guided(self.root / "data", self.live, plot=False)
+            self.assertEqual(saved_path, guided._progress_path(guided._batch_folder(self.path)))
+            self.path = saved_path
         connect.assert_called_once()
         self.assertEqual(client.start.call_count, 2)
+        self.assertEqual(self.path.parent.parent.name, "20m_Ini0_Ref90")
+        self.assertFalse((guided._batch_folder(self.path) / "capture").exists())
         saved = guided._load_progress(self.path)
         self.assertEqual(set(saved["completed_conditions"]), {"20m_90deg", "1m_0deg"})
 

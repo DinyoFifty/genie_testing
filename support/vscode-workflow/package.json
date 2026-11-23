@@ -2,7 +2,7 @@
   "name": "genie-files-manager",
   "displayName": "Genie Files",
   "description": "Quick access to the Genie workflow and antenna offset headers.",
-  "version": "1.4.5",
+  "version": "1.4.8",
   "publisher": "local-genie",
   "engines": {
     "vscode": "^1.74.0"

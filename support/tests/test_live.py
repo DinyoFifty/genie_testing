@@ -1,6 +1,5 @@
 """Synthetic transport tests; these do not establish hardware performance."""
 from contextlib import nullcontext
-from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -56,13 +55,18 @@ class LiveTests(unittest.TestCase):
         self.swap.touch()
         self.assertEqual(find_recording(self.root), self.path)
 
-    def test_live_folders_use_local_start_and_allow_two_sessions_in_one_minute(self):
+    def test_single_trials_share_condition_names_without_replacing_repeats(self):
         out = self.root / "live"
-        first = create_live_session(out, datetime(2026, 11, 19, 16, 10, 1))
-        second = create_live_session(out, datetime(2026, 11, 19, 16, 10, 59))
-        self.assertEqual(first.name, "2026-11-19_4-10PM")
-        self.assertEqual(second.name, "2026-11-19_4-10PM-02")
+        conditions = {"initiator_yaw_deg": 360, "reflector_yaw_deg": -45}
+        first = create_live_session(out, 1, conditions)
+        marker = first / "original.txt"
+        marker.write_text("keep first capture")
+        second = create_live_session(out, 1, conditions)
+        self.assertEqual(first.name, "1m_Ini0_Ref315")
+        self.assertEqual(second.name, "1m_Ini0_Ref315_02")
+        self.assertEqual(marker.read_text(), "keep first capture")
         self.assertTrue(first.is_dir() and second.is_dir())
+        self.assertEqual(create_live_session(out, 2).name, "2m_IniUnknown_RefUnknown")
 
     def test_play_button_prompts_before_launching_analyzer(self):
         recording = Mock()
@@ -82,7 +86,7 @@ class LiveTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["actual_distance"], 1.0)
         self.assertEqual(run.call_args.kwargs["conditions"],
                          {"initiator_height_m": 1.5, "reflector_height_m": 1.6,
-                          "initiator_yaw_deg": 45.0, "reflector_yaw_deg": -45.0})
+                          "initiator_yaw_deg": 45.0, "reflector_yaw_deg": 315.0})
         self.assertIs(run.call_args.kwargs["recording"], recording)
 
     def test_yaw_prompts_allow_skips_and_preserve_zero(self):
@@ -172,23 +176,27 @@ class LiveTests(unittest.TestCase):
 
         def savefig(fig, file, **kwargs):
             title = fig.axes[0].get_title()
-            self.assertIn("Initiator yaw = +45\N{DEGREE SIGN}", title)
-            self.assertIn("Reflector yaw = -45\N{DEGREE SIGN}", title)
+            self.assertIn("Initiator yaw = 45\N{DEGREE SIGN}", title)
+            self.assertIn("Reflector yaw = 315\N{DEGREE SIGN}", title)
             self.assertIn("Initiator height = 1.5 m", title)
             self.assertIn("Reflector height = 1.6 m", title)
-            reference, = [line for line in fig.axes[0].lines if line.get_label() == "Tape distance (1 m)"]
+            self.assertIn("Session 1.5m_Ini45_Ref315", title)
+            reference, = [line for line in fig.axes[0].lines if line.get_label() == "Tape distance (1.5 m)"]
             self.assertEqual(reference.get_color(), "#b63131")
             self.assertEqual(reference.get_linestyle(), ":")
             values = reference.get_ydata() if "order" in file.name else reference.get_xdata()
-            self.assertEqual(list(values), [1.0, 1.0])
+            self.assertEqual(list(values), [1.5, 1.5])
             return original_savefig(fig, file, **kwargs)
 
         with patch.object(Figure, "savefig", savefig):
             session = run_live(self.path, out=self.root / "live", plot=False,
-                               duration=0.05, interval=0.01, actual_distance=1.0, conditions=conditions)
+                               duration=0.05, interval=0.01, actual_distance=1.5, conditions=conditions)
         summary = json.loads((session / "capture" / "summary.json").read_text())
-        self.assertEqual(summary["conditions"], conditions)
-        self.assertEqual(summary["actual_distance_m"], 1.0)
+        self.assertEqual(summary["conditions"], {**conditions, "reflector_yaw_deg": 315.0})
+        self.assertEqual(summary["actual_distance_m"], 1.5)
+        self.assertEqual(session.name, "1.5m_Ini45_Ref315")
+        self.assertTrue(summary["session_started_at_utc"])
+        self.assertEqual(conditions["reflector_yaw_deg"], -45.0)
 
     def test_zero_and_error_metrics_preserve_raw_and_do_not_claim_success(self):
         raw = (json.dumps(self.event) + "\n").encode()

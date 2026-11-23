@@ -13,6 +13,7 @@ from uuid import uuid4
 from flash import FIRMWARE, PROJECTS
 from .genie_live import analyzer_session, finite, last_board_heights, run_live
 from .trial_storage import (batch_active, condition_name, linked, local_timestamp,
+                            migrate_single_trials, normalize_conditions, normalize_yaw,
                             recycle_folder, trial_folders)
 
 
@@ -20,10 +21,6 @@ DISTANCES = (1, 2, 5, 10, 20)
 ANGLES = tuple(range(0, 360, 45))
 ESTIMATE_TARGET = 100
 PROGRESS_VERSION = 1
-
-
-def normalize_yaw(value):
-    return value % 360 if finite(value) else None
 
 
 def _definition(source, name, path):
@@ -113,7 +110,7 @@ def _batch_lock(path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as stream:
-        marker = path.with_name("progress.active.json")
+        marker = path.with_name(".progress.active.json" if path.name.startswith(".") else "progress.active.json")
         if os.name == "nt":
             import msvcrt
 
@@ -259,6 +256,7 @@ def recover_progress(progress, live_dir):
 
 def begin_attempt(progress, path, distance, conditions):
     """Persist the intended condition before asking Analyzer to record."""
+    conditions = normalize_conditions(conditions)
     started = datetime.now(timezone.utc).isoformat()
     attempt_id = uuid4().hex
     progress["attempts"].append({"attempt_id": attempt_id, "started_at_utc": started,
@@ -289,6 +287,7 @@ def _number(question, default=None, *, nonnegative=False):
 
 
 def _new_progress(snapshot, live_dir):
+    print("Yaw is measured clockwise from each board's 0-degree baseline, viewed from above (0 to 359 degrees).", flush=True)
     while True:
         rotated = input("Board to rotate [reflector/initiator, Enter = reflector]? ").strip().casefold()
         if rotated in ("", "reflector", "initiator"):
@@ -336,18 +335,60 @@ def _load_progress(path):
     return progress
 
 
-def _create_batch_folder(progress, live_dir):
+def _batch_folder(path):
+    path = Path(path)
+    return next((parent for parent in path.parents if parent.parent.name in ("guided", "calibration")), path.parent)
+
+
+def _progress_path(batch):
+    batch = Path(batch)
+    paths = [path for pattern in (".progress.json", "*/capture/progress.json", "capture/progress.json", "progress.json")
+             for path in sorted(batch.glob(pattern))]
+    if len(paths) > 1:
+        raise ValueError(f"Multiple progress files in {batch.name}; none was replaced.")
+    return paths[0] if paths else batch / ".progress.json"
+
+
+def _lock_path(path):
+    return _batch_folder(path) / ".progress.lock"
+
+
+def _place_progress(path, progress):
+    """Keep batch progress in the first saved condition's existing capture folder."""
+    path = Path(path)
+    batch = _batch_folder(path)
+    destination = batch / ".progress.json"
+    if path.parent.name == "capture" and path.parent.parent.parent == batch:
+        return path
+    for summary_path in sorted(batch.glob("*/capture/summary.json")):
+        if linked(summary_path.parent.parent) or summary_path.parent.parent.name.startswith((".", "_")):
+            continue
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        metadata = summary.get("calibration")
+        if isinstance(metadata, dict) and metadata.get("batch_id") == progress["batch_id"]:
+            destination = summary_path.with_name("progress.json")
+            break
+    if path != destination:
+        if destination.exists():
+            raise ValueError("The destination progress file already exists; neither was replaced.")
+        path.rename(destination)
+    return destination
+
+
+def _create_batch_folder(progress, live_dir, number=None):
     guided = Path(live_dir) / "guided"
     guided.mkdir(parents=True, exist_ok=True)
     numbers = [int(match[1]) for path in guided.iterdir()
-               if (match := re.match(r"Trial(\d+)_", path.name))]
-    number = max(numbers, default=0) + 1
+               if (match := re.match(r"(?:Batch|Trial)(\d+)_", path.name))]
+    number = max(numbers, default=0) + 1 if number is None else number
     snapshot = progress["firmware"]
     pair = ("DUAL" if snapshot["mode"] == "normal" else
             "-".join(f"ANT{snapshot['projects'][role]['physical_antenna']}" for role in PROJECTS))
-    stamp = local_timestamp(progress["created_at_utc"])
     while True:
-        path = guided / f"Trial{number}_{pair}_{stamp}"
+        path = guided / f"Batch{number}_{pair}"
         try:
             path.mkdir()
         except FileExistsError:
@@ -366,7 +407,8 @@ def _retire_capture(folder):
 def publish_trial(progress, path, session, live_dir, *, recovering=False):
     """Promote a finished capture; a failed retry never replaces a completed trial."""
     session, live_dir = Path(session).resolve(), Path(live_dir).resolve()
-    batch = Path(path).parent.resolve()
+    batch = _batch_folder(path).resolve()
+    path = _progress_path(batch)
     if not session.is_relative_to(live_dir) or linked(session) or not batch.is_relative_to(live_dir / "guided"):
         raise ValueError("Guided captures must stay inside this project's live folder.")
     summary_path = session / "capture/summary.json"
@@ -414,6 +456,14 @@ def publish_trial(progress, path, session, live_dir, *, recovering=False):
                 save_progress(path, progress)
                 _retire_capture(retired)
                 return target
+        if path.is_relative_to(target):
+            # The condition being retried also holds the whole batch's progress.
+            # Keep it outside the replaced capture until the new capture is in place.
+            temporary_state = batch / ".progress.json"
+            if temporary_state.exists():
+                raise ValueError("A saved batch progress file already exists outside this condition.")
+            path.rename(temporary_state)
+            path = temporary_state
         backup = batch / f".replaced-{uuid4().hex}"
         target.rename(backup)
     try:
@@ -432,6 +482,7 @@ def publish_trial(progress, path, session, live_dir, *, recovering=False):
     _apply_summary(progress, summary, target, live_dir)
     _refresh_completed(progress)
     save_progress(path, progress)
+    _place_progress(path, progress)
     if backup is not None:
         _retire_capture(backup)
     return target
@@ -450,61 +501,103 @@ def organize_batch(progress, path, live_dir):
             continue
     for _, session in sorted(captures, key=lambda item: (item[0], str(item[1]))):
         publish_trial(progress, path, session, live_dir, recovering=True)
+        path = _progress_path(_batch_folder(path))
     recover_progress(progress, live_dir)
     save_progress(path, progress)
-    pending = Path(path).parent / ".pending"
+    pending = _batch_folder(path) / ".pending"
     if pending.is_dir() and not any(pending.iterdir()):
         pending.rmdir()
+    return path
 
 
 def migrate_batches(live_dir, calibration_dir):
-    """Bring legacy progress and its recordings together without changing raw data."""
+    """Use short batch names and keep progress inside an existing condition's capture."""
     guided = Path(live_dir).resolve() / "guided"
     legacy = Path(calibration_dir).resolve()
-    if legacy == guided:
-        return
-    for path in sorted(legacy.glob("*/progress.json")):
-        if linked(path.parent) or batch_active(path.parent):
+    roots = [guided] if legacy == guided else [guided, legacy]
+    paths = [path for root in roots for pattern in ("*/*/capture/progress.json", "*/.progress.json",
+                                                   "*/capture/progress.json", "*/progress.json")
+             for path in sorted(root.glob(pattern))]
+    migrated = []
+    for path in paths:
+        batch = _batch_folder(path)
+        if linked(batch) or linked(path.parent) or batch_active(batch):
             continue
         try:
             progress = _load_progress(path)
-        except (OSError, ValueError):
-            print(f"Could not read saved guided progress in {path.parent.name}.", flush=True)
-            continue
-        with _batch_lock(path.with_name("progress.lock")):
-            target = _create_batch_folder(progress, live_dir)
-        target.rmdir()
-        path.parent.rename(target)
-        path = target / "progress.json"
-        progress["batch_name"] = target.name
-        with _batch_lock(path.with_name("progress.lock")):
-            organize_batch(progress, path, live_dir)
+            if _progress_path(batch) != path:
+                raise ValueError("The batch progress path is ambiguous.")
+            old_name = batch.name
+            old_prefix = f"guided/{old_name}/"
+            match = re.match(r"Trial(\d+)_", old_name)
+            target = batch
+            if batch.parent != guided or match:
+                # Verify the old writer has released its lock before moving its folder.
+                with _batch_lock(_lock_path(path)):
+                    pass
+                target = _create_batch_folder(progress, live_dir, int(match[1]) if match else None)
+                target.rmdir()
+                batch.rename(target)
+                path = target / path.relative_to(batch)
+            original_path = path
+            path = _place_progress(path, progress)
+            old_lock = original_path.with_name("progress.lock")
+            if old_lock.exists() and old_lock != _lock_path(path):
+                old_lock.unlink()
+            if original_path.parent == target / "capture" and not any(original_path.parent.iterdir()):
+                original_path.parent.rmdir()
+            if target == batch and original_path == path and progress.get("batch_name") == target.name and not match:
+                continue
+            progress["batch_name"] = target.name
+            for attempt in progress["attempts"]:
+                previous = attempt.get("live_folder", "")
+                if previous.startswith(old_prefix):
+                    attempt["live_folder"] = f"guided/{target.name}/" + previous[len(old_prefix):]
+            with _batch_lock(_lock_path(path)):
+                save_progress(path, progress)
+                for session in trial_folders(target, include_temporary=True):
+                    summary_path = session / "capture/summary.json"
+                    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                    metadata = summary.get("calibration")
+                    if isinstance(metadata, dict) and metadata.get("batch_id") == progress["batch_id"]:
+                        metadata["batch_name"] = target.name
+                        save_progress(summary_path, summary)
+                organize_batch(progress, path, live_dir)
+            migrated.append((batch, target))
+        except (OSError, ValueError, RuntimeError) as error:
+            print(f"Could not update saved guided batch {batch.name}: {error}", flush=True)
+    return migrated
 
 
 def delete_batch(path, live_dir):
     path = Path(path).resolve()
+    batch = _batch_folder(path)
     guided = (Path(live_dir) / "guided").resolve()
-    if path.parent.parent != guided or linked(path.parent):
+    if batch.parent != guided or linked(batch) or linked(path.parent):
         raise ValueError("Select one guided batch inside data/live/guided.")
-    if batch_active(path.parent):
+    if batch_active(batch):
         raise RuntimeError("This batch is recording. Stop its guided session before deleting it.")
-    with _batch_lock(path.with_name("progress.lock")):
+    with _batch_lock(_lock_path(path)):
         pass
-    recycle_folder(path.parent)
+    recycle_folder(batch)
 
 
 def choose_batch(snapshot, live_dir, calibration_dir):
+    migrate_single_trials(live_dir)
     migrate_batches(live_dir, calibration_dir)
     guided = Path(live_dir) / "guided"
     managed = False
     while True:
         batches = []
-        for path in sorted(guided.glob("*/progress.json"), reverse=True):
+        for batch in sorted(guided.iterdir(), reverse=True) if guided.exists() else []:
+            if not batch.is_dir() or linked(batch):
+                continue
             try:
+                path = _progress_path(batch)
                 progress = _load_progress(path)
                 recover_progress(progress, live_dir)
             except (OSError, ValueError):
-                print(f"Could not read saved guided progress in {path.parent.name}.", flush=True)
+                print(f"Could not read saved guided progress in {batch.name}.", flush=True)
                 continue
             batches.append((path, progress))
         batches.sort(key=lambda item: item[1].get("created_at_utc", ""), reverse=True)
@@ -516,7 +609,7 @@ def choose_batch(snapshot, live_dir, calibration_dir):
             managed = True
             for index, (path, progress) in enumerate(batches, 1):
                 different = " (different antenna/settings)" if index not in compatible else ""
-                print(f"{index}. {path.parent.name} — {len(progress['completed_conditions'])}/40 complete, "
+                print(f"{index}. {_batch_folder(path).name} — {len(progress['completed_conditions'])}/40 complete, "
                       f"rotate {progress['rotated_board']}{different}", flush=True)
             default = str(compatible[0]) if compatible else "new"
             choice = input(f"Resume batch [Enter = {default}], new, delete NUMBER, or done? ").strip().casefold() or default
@@ -526,14 +619,14 @@ def choose_batch(snapshot, live_dir, calibration_dir):
             progress = _new_progress(snapshot, live_dir)
             batch = _create_batch_folder(progress, live_dir)
             progress["batch_name"] = batch.name
-            path = batch / "progress.json"
+            path = batch / ".progress.json"
             save_progress(path, progress)
             return path, progress
         if choice.startswith("delete "):
             number = choice[7:].strip()
             if number.isdigit() and 1 <= int(number) <= len(batches):
                 path, _ = batches[int(number) - 1]
-                confirm = input(f"Move {path.parent.name} and all its trials to the Recycle Bin? [y/N] ").strip().casefold()
+                confirm = input(f"Move {_batch_folder(path).name} and all its trials to the Recycle Bin? [y/N] ").strip().casefold()
                 if confirm in ("y", "yes"):
                     try:
                         delete_batch(path, live_dir)
@@ -583,7 +676,7 @@ def _prompt_trial(progress):
         default = f" [Enter = {suggested:g}]" if suggested is not None else ""
         yaw = _number(f"{role.capitalize()} yaw in degrees{default}, or skip? ", suggested)
         if yaw is not None:
-            conditions[f"{role}_yaw_deg"] = yaw
+            conditions[f"{role}_yaw_deg"] = normalize_yaw(yaw)
     if condition_key(progress, distance, conditions) is None:
         print("This condition will be saved as an extra trial outside the 40 planned points.", flush=True)
     elif condition_key(progress, distance, conditions) in progress["completed_conditions"]:
@@ -611,10 +704,11 @@ def run_guided(folder, out, *, plot=True, interval=0.5):
     if selected is None:
         return None
     path, _ = selected
-    with _batch_lock(path.with_name("progress.lock")), ExitStack() as connections:
+    with _batch_lock(_lock_path(path)), ExitStack() as connections:
         progress = recover_progress(_load_progress(path), live_dir)
-        progress.setdefault("batch_name", path.parent.name)
-        organize_batch(progress, path, live_dir)
+        batch = _batch_folder(path)
+        progress.setdefault("batch_name", batch.name)
+        path = organize_batch(progress, path, live_dir)
         save_progress(path, progress)
         mode_label = "Normal dual-antenna testing" if snapshot["mode"] == "normal" else "Isolated-antenna calibration"
         print(mode_label, flush=True)
@@ -648,10 +742,11 @@ def run_guided(folder, out, *, plot=True, interval=0.5):
                     print("Firmware settings changed while connecting. Progress is saved. Start a new batch after flashing.", flush=True)
                     break
                 capture = client.start(max_estimates=ESTIMATE_TARGET)
-                session = run_live(folder=folder, out=path.parent / ".pending", interval=interval, plot=plot,
+                session = run_live(folder=folder, out=batch / ".pending", interval=interval, plot=plot,
                                    field="distanceMain", actual_distance=distance, conditions=conditions,
                                    recording=capture, max_estimates=ESTIMATE_TARGET, calibration=metadata)
                 session = publish_trial(progress, path, session, live_dir)
+                path = _progress_path(batch)
                 recover_progress(progress, live_dir)
                 save_progress(path, progress)
                 attempt = next(item for item in progress["attempts"] if item["attempt_id"] == metadata["attempt_id"])
@@ -666,9 +761,10 @@ def run_guided(folder, out, *, plot=True, interval=0.5):
         except (KeyboardInterrupt, EOFError):
             print("Guided collection stopped. Saved progress can be resumed next time.", flush=True)
         finally:
+            path = _progress_path(batch)
             recover_progress(progress, live_dir)
             save_progress(path, progress)
-            pending = path.parent / ".pending"
+            pending = batch / ".pending"
             if pending.is_dir() and not any(pending.iterdir()):
                 pending.rmdir()
     return path

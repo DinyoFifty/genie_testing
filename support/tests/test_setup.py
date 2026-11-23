@@ -153,6 +153,9 @@ class SetupTests(unittest.TestCase):
     def test_refresh_paths_preserves_offsets_and_is_repeatable(self):
         with tempfile.TemporaryDirectory(prefix="Genie setup ") as directory:
             root = Path(directory)
+            defaults = root / "support/local_defaults/.vscode/settings.json"
+            defaults.parent.mkdir(parents=True)
+            defaults.write_text(json.dumps({"files.exclude": {".venv": True}}), encoding="utf-8")
             for project_name in flash.PROJECTS.values():
                 project = root / "firmware" / project_name
                 (project / "cmake_gcc").mkdir(parents=True)

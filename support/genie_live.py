@@ -22,6 +22,9 @@ from threading import Thread
 import time
 from uuid import uuid4
 
+from .trial_storage import (create_condition_folder, migrate_single_trials,
+                            normalize_conditions, normalize_yaw)
+
 
 FIELDS = ("connection", "initiatorId", "reflectorId", "distanceMainRaw",
           "distanceMain", "distanceSubRaw", "distanceSub", "rssiDistance",
@@ -155,14 +158,14 @@ def prompt_trial_details(out=PROJECT_DATA / "live"):
                                     "Enter a nonnegative number in meters, such as 1 or 1.0, or type skip.",
                                     nonnegative=True)
     heights = prompt_heights()
-    print("Measure yaw from each board's baseline. Clockwise from above is positive.", flush=True)
-    yaw_hint = "Enter a number in degrees, such as +45, -45, or 0, or type skip."
+    print("Measure yaw clockwise from each board's 0-degree baseline, viewed from above (0 to 359 degrees).", flush=True)
+    yaw_hint = "Enter an angle such as 0, 45, or 315, or type skip."
     initiator_yaw = number_answer("Initiator yaw in degrees? ", yaw_hint)
     reflector_yaw = number_answer("Reflector yaw in degrees? ", yaw_hint)
     notes = answer("Any other test conditions to note (e.g. coin cell, obstacle, settings change)? ")
     conditions = {**heights, "initiator_yaw_deg": initiator_yaw,
                   "reflector_yaw_deg": reflector_yaw, "setup_notes": notes}
-    return actual_distance, {key: value for key, value in conditions.items() if value is not None}
+    return actual_distance, normalize_conditions({key: value for key, value in conditions.items() if value is not None})
 
 
 def workbook_distance(value):
@@ -199,7 +202,7 @@ def write_measurement_plots(workbook_path, actual_distance=None, conditions=None
     raw_values = [value for value in raw if finite(value)]
     filtered_values = [value for value in filtered if finite(value)]
     reading_numbers = range(1, len(filtered) + 1)
-    session_id = workbook_path.parent.name.split(".")[0]
+    session_id = workbook_path.parent.name
     blue = "#185589"
     subtitle = f"Session {session_id}  |  {len(filtered)} recorded rows"
     reference_label = f"Tape distance ({actual_distance:g} m)" if actual_distance is not None else None
@@ -209,7 +212,7 @@ def write_measurement_plots(workbook_path, actual_distance=None, conditions=None
         if value is None or value == "":
             continue
         if key.endswith("_yaw_deg") and finite(value):
-            value = f"{value:+g}\N{DEGREE SIGN}" if value else "0\N{DEGREE SIGN}"
+            value = f"{normalize_yaw(value):g}\N{DEGREE SIGN}"
         if key in HEIGHT_BOARDS and finite(value):
             value = f"{value:g} m"
         condition_lines.extend(wrap(f"{label} = {value}", width=72))
@@ -419,20 +422,9 @@ class RecordingReader:
         return result
 
 
-def create_live_session(out, local_start):
-    hour = local_start.hour % 12 or 12
-    period = "AM" if local_start.hour < 12 else "PM"
-    name = f"{local_start:%Y-%m-%d}_{hour}-{local_start:%M}{period}"
-    folder = Path(out)
-    number = 1
-    while True:
-        session = folder / (name if number == 1 else f"{name}-{number:02d}")
-        try:
-            session.mkdir(parents=True)
-        except FileExistsError:
-            number += 1
-        else:
-            return session
+def create_live_session(out, actual_distance=None, conditions=None):
+    migrate_single_trials(out)
+    return create_condition_folder(out, actual_distance, conditions or {})
 
 
 class AnalyzerCapture:
@@ -664,7 +656,8 @@ def run_live(log=None, folder="data", out="data/live", duration=None,
         ax.legend()
         plt.show(block=False)
     started_at_utc = datetime.now(timezone.utc)
-    session = create_live_session(out, started_at_utc.astimezone())
+    conditions = normalize_conditions(conditions)
+    session = create_live_session(out, actual_distance, conditions)
     capture = session / "capture"
     capture.mkdir()
     raw_path = capture / "raw.jsonl"

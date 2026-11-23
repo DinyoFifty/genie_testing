@@ -47,11 +47,47 @@ async function activate(context) {
             && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative);
     }
 
+    async function batchProgress(batch) {
+        const candidates = [path.join(batch, ".progress.json"), path.join(batch, "progress.json"),
+            path.join(batch, "capture", "progress.json")];
+        for (const entry of await fs.readdir(batch, { withFileTypes: true })) {
+            if (entry.isDirectory() && !entry.name.startsWith(".") && !entry.name.startsWith("_")) {
+                candidates.push(path.join(batch, entry.name, "capture", "progress.json"));
+            }
+        }
+        const found = [];
+        for (const candidate of candidates) {
+            try { await fs.access(candidate); found.push(candidate); }
+            catch (error) { if (error.code !== "ENOENT") throw error; }
+        }
+        if (found.length > 1) throw new Error("Multiple batch progress files exist; none was replaced.");
+        return found[0];
+    }
+
+    async function placeBatchProgress(batch, source) {
+        const progress = JSON.parse(await fs.readFile(source, "utf8"));
+        const entries = await fs.readdir(batch, { withFileTypes: true });
+        entries.sort((first, second) => first.name.localeCompare(second.name, undefined, { numeric: true }));
+        for (const entry of entries) {
+            if (!entry.isDirectory() || entry.name.startsWith(".") || entry.name.startsWith("_")) continue;
+            const capture = path.join(batch, entry.name, "capture");
+            let summary;
+            try { summary = JSON.parse(await fs.readFile(path.join(capture, "summary.json"), "utf8")); }
+            catch { continue; }
+            if (summary.calibration?.batch_id !== progress.batch_id) continue;
+            const destination = path.join(capture, "progress.json");
+            if (source !== destination) {
+                await vscode.workspace.fs.rename(vscode.Uri.file(source), vscode.Uri.file(destination), { overwrite: false });
+            }
+            return;
+        }
+    }
+
     function file(relativePath, label = path.basename(relativePath)) {
         const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
         item.resourceUri = vscode.Uri.file(path.join(root, relativePath));
         item.tooltip = item.resourceUri.fsPath;
-        const managed = ["progress.json", "progress.lock", "progress.active.json"].includes(path.basename(relativePath));
+        const managed = ["progress.json", "progress.lock", "progress.active.json"].includes(path.basename(relativePath).replace(/^\./, ""));
         item.contextValue = isLiveEntry(item.resourceUri.fsPath) && !managed ? "genieLiveFile" : "genieFile";
         item.command = { command: "vscode.open", title: "Open", arguments: [item.resourceUri] };
         return item;
@@ -109,15 +145,29 @@ async function activate(context) {
                     children.unshift(folder(path.join(item.relativePath, "guided"), "Guided batches"));
                 }
                 try {
-                    const summary = path.join(item.resourceUri.fsPath, "capture", "summary.json");
+                    const batch = path.dirname(item.resourceUri.fsPath) === guidedRoot;
+                    const summary = batch ? await batchProgress(item.resourceUri.fsPath)
+                        : path.join(item.resourceUri.fsPath, "capture", "summary.json");
                     const metadata = JSON.parse(await fs.readFile(summary, "utf8"));
-                    const recorded = metadata.session_started_at_utc || metadata.calibration?.started_at_utc;
-                    if (recorded) {
-                        const detail = new vscode.TreeItem(`Recorded: ${new Date(recorded).toLocaleString()}`,
+                    let recorded = batch ? metadata.created_at_utc
+                        : metadata.session_started_at_utc || metadata.calibration?.started_at_utc;
+                    let timeLabel = "Recorded";
+                    if (!recorded && !batch) {
+                        // Older captures saved host read times, but no session start timestamp.
+                        const csv = await fs.readFile(path.join(item.resourceUri.fsPath, "capture", "measurements.csv"), "utf8");
+                        const [header, firstRow] = csv.split(/\r?\n/, 2);
+                        if (header.startsWith("source_line,read_at_utc,")) {
+                            recorded = firstRow?.split(",")[1];
+                            timeLabel = "First reading";
+                        }
+                    }
+                    if (recorded && Number.isFinite(Date.parse(recorded))) {
+                        const detail = new vscode.TreeItem(`${timeLabel}: ${new Date(recorded).toLocaleString("en-US")}`,
                             vscode.TreeItemCollapsibleState.None);
                         detail.iconPath = new vscode.ThemeIcon("clock");
                         detail.tooltip = recorded;
-                        detail.command = { command: "vscode.open", title: "Trial details", arguments: [vscode.Uri.file(summary)] };
+                        detail.command = { command: "vscode.open", title: batch ? "Batch details" : "Trial details",
+                            arguments: [vscode.Uri.file(summary)] };
                         children.unshift(detail);
                     }
                 } catch { /* Containers do not have a capture summary. */ }
@@ -149,7 +199,7 @@ async function activate(context) {
             if (!selectedItems.length) return;
             const uris = selectedItems.map(selected => selected?.resourceUri);
             if (uris.some(uri => !uri || !isLiveEntry(uri.fsPath) || uri.fsPath === guidedRoot
-                || ["progress.json", "progress.lock", "progress.active.json"].includes(path.basename(uri.fsPath)))) {
+                || ["progress.json", "progress.lock", "progress.active.json"].includes(path.basename(uri.fsPath).replace(/^\./, "")))) {
                 await vscode.window.showErrorMessage("Select files or folders inside data/live.");
                 return;
             }
@@ -164,15 +214,18 @@ async function activate(context) {
                     const info = await fs.stat(uri.fsPath);
                     const start = info.isDirectory() ? uri.fsPath : path.dirname(uri.fsPath);
                     for (let current = start; isLiveEntry(current); current = path.dirname(current)) {
-                        try {
-                            const marker = JSON.parse(await fs.readFile(path.join(current, "progress.active.json"), "utf8"));
-                            if (!Number.isInteger(marker.pid) || marker.pid <= 0) throw new Error("Invalid active batch marker");
-                            try { process.kill(marker.pid, 0); }
-                            catch (error) { if (error.code === "ESRCH") continue; throw error; }
-                            await vscode.window.showErrorMessage("Stop this guided session before deleting its batch or trials.");
-                            return;
-                        } catch (error) {
-                            if (error.code !== "ENOENT") throw error;
+                        for (const markerPath of [path.join(current, ".progress.active.json"),
+                            path.join(current, "progress.active.json"), path.join(current, "capture", "progress.active.json")]) {
+                            try {
+                                const marker = JSON.parse(await fs.readFile(markerPath, "utf8"));
+                                if (!Number.isInteger(marker.pid) || marker.pid <= 0) throw new Error("Invalid active batch marker");
+                                try { process.kill(marker.pid, 0); }
+                                catch (error) { if (error.code === "ESRCH") continue; throw error; }
+                                await vscode.window.showErrorMessage("Stop this guided session before deleting its batch or trials.");
+                                return;
+                            } catch (error) {
+                                if (error.code !== "ENOENT") throw error;
+                            }
                         }
                     }
                 }
@@ -187,6 +240,17 @@ async function activate(context) {
                         { modal: true }, "Delete");
                     if (answer !== "Delete") return;
                 }
+                const retainedProgress = [];
+                const batches = new Set(targets.filter(uri => isLiveEntry(uri.fsPath, guidedRoot)).map(uri =>
+                    path.join(guidedRoot, path.relative(guidedRoot, uri.fsPath).split(path.sep)[0])));
+                for (const batch of batches) {
+                    if (targets.some(uri => uri.fsPath === batch)) continue;
+                    const progress = await batchProgress(batch);
+                    if (!progress || !targets.some(uri => isLiveEntry(progress, uri.fsPath))) continue;
+                    const destination = path.join(batch, ".progress.json");
+                    await vscode.workspace.fs.rename(vscode.Uri.file(progress), vscode.Uri.file(destination), { overwrite: false });
+                    retainedProgress.push([batch, destination]);
+                }
                 const failures = [];
                 for (const uri of targets) {
                     try {
@@ -195,6 +259,7 @@ async function activate(context) {
                         failures.push(`${path.basename(uri.fsPath)} (${error.message})`);
                     }
                 }
+                for (const [batch, progress] of retainedProgress) await placeBatchProgress(batch, progress);
                 changes.fire();
                 if (failures.length) {
                     await vscode.window.showErrorMessage(

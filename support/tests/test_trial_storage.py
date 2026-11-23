@@ -11,7 +11,8 @@ from unittest.mock import patch
 from linearreg import find_runs, regression_data
 from support import genie_calibration as guided
 from support.genie_live import run_live
-from support.trial_storage import batch_active, condition_name, trial_folders
+from support.trial_storage import (batch_active, condition_name, migrate_single_trials,
+                                   normalize_conditions, normalize_yaw, trial_folders)
 
 
 class TrialStorageTests(unittest.TestCase):
@@ -20,8 +21,8 @@ class TrialStorageTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.live = self.root / "data/live"
-        self.batch = self.live / "guided/Trial1_ANT1-ANT1_2026-11-22_3-44PM"
-        self.path = self.batch / "progress.json"
+        self.batch = self.live / "guided/Batch1_ANT1-ANT1"
+        self.path = self.batch / ".progress.json"
         firmware = {"mode": "isolated", "fingerprint": "baseline", "projects": {
             role: {"project": project, "physical_antenna": 1, "available_antennas": 1,
                    "aox_control_pins": 0, "offset_config_type": "wireless",
@@ -55,17 +56,111 @@ class TrialStorageTests(unittest.TestCase):
 
     def publish(self, session):
         with patch.object(guided, "recycle_folder", side_effect=self.recycle):
-            return guided.publish_trial(self.progress, self.path, session, self.live)
+            result = guided.publish_trial(self.progress, self.path, session, self.live)
+            self.path = guided._progress_path(self.batch)
+            return result
 
     def test_condition_names_and_numbered_antenna_batch_names(self):
         self.assertEqual(condition_name(1, {"initiator_yaw_deg": 360, "reflector_yaw_deg": -45}),
                          "1m_Ini0_Ref315")
         self.assertEqual(condition_name(None, {}), "Unknownm_IniUnknown_RefUnknown")
         folder = guided._create_batch_folder(self.progress, self.live)
-        self.assertRegex(folder.name, r"^Trial2_ANT1-ANT1_2026-11-22_\d+-44(?:AM|PM)$")
+        self.assertEqual(folder.name, "Batch2_ANT1-ANT1")
         normal = copy.deepcopy(self.progress)
         normal["firmware"]["mode"] = "normal"
-        self.assertTrue(guided._create_batch_folder(normal, self.live).name.startswith("Trial3_DUAL_"))
+        self.assertEqual(guided._create_batch_folder(normal, self.live).name, "Batch3_DUAL")
+
+    def test_existing_batch_renames_and_moves_progress_without_changing_measurements(self):
+        trial = self.publish(self.capture(contents=b"original measurements"))
+        progress = guided._load_progress(self.path)
+        old_name = "Trial1_ANT1-ANT1_2026-11-22_3-44PM"
+        progress["batch_name"] = old_name
+        progress["attempts"][0]["live_folder"] = f"guided/{old_name}/{trial.name}"
+        old_state = self.batch / "progress.json"
+        guided.save_progress(old_state, progress)
+        self.path.unlink()
+        legacy = self.batch.with_name(old_name)
+        self.batch.rename(legacy)
+        before = {path.relative_to(legacy): path.read_bytes() for path in legacy.rglob("*")
+                  if path.is_file() and path.name not in ("progress.json", "summary.json")}
+        guided.migrate_batches(self.live, self.root / "data/calibration")
+        self.assertFalse(legacy.exists())
+        self.assertTrue(self.path.is_file())
+        self.assertFalse((self.batch / "progress.json").exists())
+        self.assertEqual(before, {relative: (self.batch / relative).read_bytes() for relative in before})
+        stored = guided._load_progress(self.path)
+        self.assertEqual(stored["created_at_utc"], progress["created_at_utc"])
+        self.assertEqual(stored["batch_id"], progress["batch_id"])
+        self.assertEqual(stored["batch_name"], self.batch.name)
+        self.assertEqual(stored["attempts"][0]["live_folder"], f"guided/{self.batch.name}/{trial.name}")
+        summary = json.loads((self.batch / trial.name / "capture/summary.json").read_text())
+        self.assertEqual(summary["calibration"]["batch_name"], self.batch.name)
+        self.assertEqual(guided.migrate_batches(self.live, self.root / "data/calibration"), [])
+        with patch("builtins.input", return_value=""):
+            reopened, saved = guided.choose_batch(progress["firmware"], self.live, self.root / "data/calibration")
+        self.assertEqual(reopened, self.path)
+        self.assertEqual(saved["completed_conditions"], ["1m_45deg"])
+
+    def test_batch_migration_keeps_existing_batch_when_number_is_taken(self):
+        legacy = self.batch.with_name("Trial1_ANT1-ANT1_2026-11-22_3-44PM")
+        progress = {**self.progress, "batch_id": "another-batch", "batch_name": legacy.name}
+        guided.save_progress(legacy / "progress.json", progress)
+        original = self.path.read_bytes()
+        guided.migrate_batches(self.live, self.root / "data/calibration")
+        self.assertEqual(self.path.read_bytes(), original)
+        moved = self.batch.with_name("Batch2_ANT1-ANT1") / ".progress.json"
+        self.assertEqual(guided._load_progress(moved)["batch_id"], "another-batch")
+
+    def test_migration_leaves_active_legacy_batch_in_place(self):
+        legacy = self.batch.with_name("Trial1_ANT1-ANT1_2026-11-22_3-44PM")
+        self.batch.rename(legacy)
+        old_path = legacy / ".progress.json"
+        with guided._batch_lock(guided._lock_path(old_path)):
+            self.assertEqual(guided.migrate_batches(self.live, self.root / "data/calibration"), [])
+            self.assertTrue(old_path.is_file())
+
+    def test_unsigned_yaw_keeps_unknown_values_missing(self):
+        for supplied, expected in ((-45, 315), (360, 0), (720, 0), (-270, 90), (45, 45)):
+            self.assertEqual(normalize_yaw(supplied), expected)
+        for missing in (None, "45", True, float("nan"), float("inf")):
+            self.assertIsNone(normalize_yaw(missing))
+        original = {"initiator_yaw_deg": -45, "reflector_yaw_deg": None, "setup_notes": "unchanged"}
+        self.assertEqual(normalize_conditions(original), {**original, "initiator_yaw_deg": 315})
+        self.assertEqual(original["initiator_yaw_deg"], -45)
+
+    def test_old_single_names_migrate_once_and_preserve_every_file(self):
+        conditions = {"initiator_yaw_deg": 360, "reflector_yaw_deg": -45}
+        old_names = ("2026-11-20_3-30PM", "2026-11-20_3-31PM")
+        original = {}
+        for number, name in enumerate(old_names):
+            folder = self.live / name
+            (folder / "capture").mkdir(parents=True)
+            summary = {"actual_distance_m": 1, "conditions": conditions,
+                       "session_started_at_utc": f"2026-11-20T20:3{number}:00Z"}
+            (folder / "capture/summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            (folder / "capture/raw.jsonl").write_bytes(f"original-{number}".encode())
+            original[name] = {path.relative_to(folder): path.read_bytes() for path in folder.rglob("*") if path.is_file()}
+        renamed = migrate_single_trials(self.live)
+        self.assertEqual([target.name for _, target in renamed], ["1m_Ini0_Ref315", "1m_Ini0_Ref315_02"])
+        for source, target in renamed:
+            self.assertFalse(source.exists())
+            self.assertEqual({path.relative_to(target): path.read_bytes() for path in target.rglob("*") if path.is_file()},
+                             original[source.name])
+        self.assertEqual(migrate_single_trials(self.live), [])
+        self.assertTrue(self.path.is_file())
+
+    def test_migration_preserves_unknowns_and_skips_active_or_guided_captures(self):
+        for name, summary in (("older", {}), ("another-older", {}),
+                              ("active", {"reports_saved": False, "stop_reason": None}),
+                              ("old-guided", {"calibration": {"batch_id": "other"}})):
+            capture = self.live / name / "capture"
+            capture.mkdir(parents=True)
+            (capture / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        renamed = migrate_single_trials(self.live)
+        self.assertEqual({target.name for _, target in renamed},
+                         {"Unknownm_IniUnknown_RefUnknown", "Unknownm_IniUnknown_RefUnknown_02"})
+        self.assertTrue((self.live / "active/capture/summary.json").exists())
+        self.assertTrue((self.live / "old-guided/capture/summary.json").exists())
 
     def test_successful_retry_replaces_one_condition_and_keeps_timestamp(self):
         target = self.publish(self.capture(contents=b"old"))
@@ -78,6 +173,22 @@ class TrialStorageTests(unittest.TestCase):
         self.assertTrue(summary["session_started_at_utc"])
         self.assertEqual(summary["calibration"]["batch_name"], self.batch.name)
         self.assertEqual(list(trial_folders(self.live)), [target])
+        self.assertEqual(self.path, target / "capture/progress.json")
+        self.assertEqual(guided._load_progress(self.path)["completed_conditions"], ["1m_45deg"])
+        self.assertFalse((self.batch / "capture").exists())
+        self.assertFalse((self.batch / ".progress.json").exists())
+
+    def test_old_batch_capture_moves_progress_into_existing_condition(self):
+        target = self.publish(self.capture(contents=b"keep measurements"))
+        old_path = self.batch / "capture/progress.json"
+        old_path.parent.mkdir()
+        self.path.rename(old_path)
+        (old_path.with_name("progress.lock")).write_bytes(b"0")
+        guided.migrate_batches(self.live, self.root / "data/calibration")
+        self.assertFalse(old_path.parent.exists())
+        self.assertEqual(guided._progress_path(self.batch), target / "capture/progress.json")
+        self.assertEqual((target / "capture/raw.jsonl").read_bytes(), b"keep measurements")
+        self.assertEqual(guided._load_progress(self.path)["completed_conditions"], ["1m_45deg"])
 
     def test_partial_or_unsaved_retry_keeps_previous_completed_capture(self):
         target = self.publish(self.capture(contents=b"keep original"))
@@ -103,6 +214,10 @@ class TrialStorageTests(unittest.TestCase):
             self.publish(new)
         self.assertEqual((target / "capture/raw.jsonl").read_bytes(), b"keep original")
         self.assertTrue(new.is_dir())
+        preserved_path = guided._progress_path(self.batch)
+        self.assertEqual(guided._load_progress(preserved_path)["batch_id"], self.progress["batch_id"])
+        guided.migrate_batches(self.live, self.root / "data/calibration")
+        self.assertTrue((target / "capture/progress.json").is_file())
 
     def test_recycling_failure_keeps_backup_out_of_regression(self):
         self.publish(self.capture(contents=b"old"))
@@ -116,7 +231,7 @@ class TrialStorageTests(unittest.TestCase):
     def test_recovery_publishes_a_completed_pending_capture(self):
         pending = self.capture()
         with patch.object(guided, "recycle_folder", side_effect=self.recycle):
-            guided.organize_batch(self.progress, self.path, self.live)
+            self.path = guided.organize_batch(self.progress, self.path, self.live)
         self.assertFalse(pending.exists())
         self.assertTrue((self.batch / "1m_Ini0_Ref45/measurements.xlsx").is_file())
         restarted = guided._load_progress(self.path)
@@ -172,23 +287,23 @@ class TrialStorageTests(unittest.TestCase):
         self.batch.rename(legacy)
         with patch.object(guided, "recycle_folder", side_effect=self.recycle):
             guided.migrate_batches(self.live, legacy.parent)
-        paths = list((self.live / "guided").glob("*/progress.json"))
+        paths = list((self.live / "guided").glob("*/*/capture/progress.json"))
         self.assertEqual(len(paths), 1)
-        folder = paths[0].parent
-        self.assertTrue(folder.name.startswith("Trial1_ANT1-ANT1_"))
+        folder = guided._batch_folder(paths[0])
+        self.assertEqual(folder.name, "Batch1_ANT1-ANT1")
         self.assertEqual((folder / "1m_Ini0_Ref45/capture/raw.jsonl").read_bytes(), b"original raw bytes")
         self.assertFalse(flat.exists())
         self.assertTrue(single.is_dir())
         self.assertEqual(len(find_runs(self.live)), 2)
 
     def test_active_batch_cannot_be_deleted_and_marker_is_cleared(self):
-        with guided._batch_lock(self.path.with_name("progress.lock")):
+        with guided._batch_lock(guided._lock_path(self.path)):
             self.assertTrue(batch_active(self.batch))
             with patch.object(guided, "recycle_folder") as recycle, self.assertRaisesRegex(RuntimeError, "recording"):
                 guided.delete_batch(self.path, self.live)
             recycle.assert_not_called()
         self.assertFalse(batch_active(self.batch))
-        self.assertFalse((self.batch / "progress.active.json").exists())
+        self.assertFalse((self.batch / ".progress.active.json").exists())
 
     def test_delete_menu_removes_progress_and_captures_together(self):
         self.publish(self.capture())

@@ -79,8 +79,8 @@ Genie opens the installed standalone Channel Sounding Analyzer. Simplicity Studi
 Choose `1` for a single trial or `2` for guided trials. Both choices use the saved antenna configuration.
 
 - Enter actual separation and board heights in meters.
-- Enter each board's yaw in degrees, such as `0`, `+45`, or `-45`.
-- Mark a consistent zero direction. Clockwise rotation viewed from above is positive.
+- Enter each board's clockwise yaw from its zero direction, viewed from above: `0`, `45`, `90`, through `315`.
+- Angles are saved from 0 to 359 degrees; entering `-45` saves `315`, and `360` saves `0`.
 - Type `skip` for an unknown condition.
 - Reuse the saved heights when they stay the same.
 
@@ -94,7 +94,7 @@ The checklist has 40 conditions, covering 1, 2, 5, 10, and 20 m at eight orienta
 
 Each completed trial uses the first 100 finite filtered distance estimates. Its raw capture retains the complete received stream. Interrupted trials save their collected readings and remain pending.
 
-Guided batches live under [data/live/guided/](data/live/guided/), with names like `Trial1_ANT1-ANT1_2026-11-22_3-44PM` or `Trial2_DUAL_2026-11-22_4-10PM`. Each condition has a folder such as `1m_Ini0_Ref45`. Expand it in Genie Files to see the recording time, workbook, plots, and capture files. Progress is saved inside the batch. Older guided batches are grouped here automatically when you next open guided collection.
+Guided batches live under [data/live/guided/](data/live/guided/), with names like `Batch1_ANT1-ANT1` or `Batch2_DUAL`. Expand a batch in Genie Files to see its `Recorded:` date and time. Each condition has a folder such as `1m_Ini0_Ref45`, containing its own recording time, workbook, plots, and capture files. Batch progress lives inside a saved condition's capture folder, for example `1m_Ini0_Ref0/capture/progress.json`. Retrying or deleting that condition through Genie Files preserves the rest of the batch's progress. Setup and guided collection automatically update older batch names and move their progress files.
 
 To redo a condition, enter the same distance and board yaws. A completed retry replaces that condition's previous result and sends the old folder to the Recycle Bin. Interrupted retries keep the previous completed result and save their partial capture under `Interrupted captures`.
 
@@ -118,7 +118,9 @@ Apply physical calibration recommendations to the headers, flash both boards, an
 
 ## Find the results
 
-Single trials appear directly in [data/live/](data/live/) under a name such as `2026-11-21_4-14PM`. Guided trials use the named condition folders inside their batch under [data/live/guided/](data/live/guided/).
+Single trials appear directly in [data/live/](data/live/) with names such as `1m_Ini0_Ref45`. Repeated single trials get suffixes such as `_02` and `_03`, keeping every capture. Unknown distances or angles stay labeled `Unknown`. Older single-trial folders are renamed automatically during setup or collection. Expand a trial in Genie Files to see its saved recording time and reports. Guided trials use the same condition names inside their batch under [data/live/guided/](data/live/guided/).
+
+Naming rules, prompts, report formatting, and the Genie Files layout are shared code and update through Git. Recordings, workbooks, plots, guided progress, antenna mode, calibration offsets, board assignments, and laptop paths stay local. Run [setup.cmd](setup.cmd) after pulling updates to refresh shared editor defaults and the Genie Files extension while preserving your saved calibration and captures.
 
 | Output | Purpose |
 | --- | --- |

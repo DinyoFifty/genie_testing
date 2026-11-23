@@ -52,6 +52,19 @@ class LocalConfigurationTests(unittest.TestCase):
         self.assertEqual(initialize_local_files(self.root), [])
         self.assertEqual(before, {path: path.read_bytes() for path in created})
 
+    def test_setup_refreshes_shared_display_rules_without_replacing_personal_settings(self):
+        configure_paths(self.root, self.tools())
+        settings_path = self.root / ".vscode/settings.json"
+        settings = json.loads(settings_path.read_text())
+        settings["editor.fontSize"] = 17
+        settings["files.exclude"] = {"my-personal-folder": True, ".venv": False}
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+        configure_paths(self.root, self.tools())
+        refreshed = json.loads(settings_path.read_text())
+        self.assertEqual(refreshed["editor.fontSize"], 17)
+        self.assertTrue(refreshed["files.exclude"]["my-personal-folder"])
+        self.assertTrue(refreshed["files.exclude"][".venv"])
+
     @unittest.skipUnless(shutil.which("git"), "Git is needed to verify a clean working tree")
     def test_mode_offsets_data_and_setup_paths_do_not_change_git(self):
         def git(*args):
@@ -86,6 +99,73 @@ class LocalConfigurationTests(unittest.TestCase):
         self.assertEqual(git("status", "--porcelain"), "")
         self.assertNotEqual(git("ls-files", "support/local_defaults"), "")
         self.assertEqual(git("ls-files", "data", "genie_testing.code-workspace", "firmware/board_roles.json"), "")
+
+    @unittest.skipUnless(shutil.which("git"), "Git is needed to verify teammate updates")
+    def test_pull_and_setup_preserve_teammate_captures_and_calibration(self):
+        def git(root, *args):
+            return subprocess.run(["git", "-C", str(root), *args],
+                                  check=True, capture_output=True, text=True).stdout
+
+        git(self.root, "init", "-q")
+        git(self.root, "add", ".")
+        identity = ("-c", "user.name=Genie test", "-c", "user.email=genie@example.invalid")
+        git(self.root, *identity, "commit", "-qm", "shared project")
+        remote = self.root.parent / "remote.git"
+        teammate = self.root.parent / "teammate"
+        git(self.root, "clone", "-q", "--bare", str(self.root), str(remote))
+        git(self.root, "remote", "add", "origin", str(remote))
+        git(self.root, "clone", "-q", str(remote), str(teammate))
+        configure_paths(teammate, self.tools())
+        configure_mode("calibration", 2, teammate / "firmware")
+        private = {}
+        for project in ("bt_cs_ncp", "bt_cs_soc_reflector_studio"):
+            header = teammate / "firmware" / project / "config/sl_rail_util_cs_antenna_offset_config.h"
+            header.write_text(replace_defines(header.read_text(), {
+                "GENIE_ANT1_WIRELESS_OFFSET_CM": 73,
+                "GENIE_ANT2_WIRELESS_OFFSET_CM": -12,
+            }, header), encoding="utf-8")
+        for relative, contents in (
+            ("data/live/1m_Ini0_Ref0/capture/raw.jsonl", b"teammate raw measurements\n"),
+            ("data/live/1m_Ini0_Ref0/measurements.xlsx", b"teammate workbook"),
+            ("data/live/guided/Batch1_ANT2-ANT2/1m_Ini0_Ref0/capture/progress.json", json.dumps({
+                "version": 1, "batch_id": "teammate-batch", "batch_name": "Batch1_ANT2-ANT2",
+                "created_at_utc": "2026-11-22T20:00:00Z", "firmware": snapshot_firmware(teammate / "firmware"),
+                "rotated_board": "reflector", "fixed_yaw_deg": 0, "setup": {},
+                "attempts": [], "completed_conditions": [],
+            }).encode("utf-8")),
+            ("firmware/board_roles.json", b'{"initiator": "teammate-board"}\n'),
+        ):
+            target = teammate / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(contents)
+            private[target] = contents
+        for relative in local_paths(teammate):
+            if relative.parts[0] == "firmware" and "config" in relative.parts:
+                target = teammate / relative
+                private[target] = target.read_bytes()
+        settings_path = teammate / ".vscode/settings.json"
+        settings = json.loads(settings_path.read_text())
+        settings["editor.fontSize"] = 19
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+        shared_rules = self.root / "support/local_defaults/.vscode/settings.json"
+        rules = json.loads(shared_rules.read_text())
+        rules.setdefault("files.exclude", {})["shared-display-rule"] = True
+        shared_rules.write_text(json.dumps(rules), encoding="utf-8")
+        default_header = self.root / "support/local_defaults/firmware/bt_cs_ncp/config/sl_rail_util_cs_antenna_offset_config.h"
+        default_header.write_text(default_header.read_text() + "\n// Updated shared template.\n", encoding="utf-8")
+        git(self.root, "add", ".")
+        git(self.root, *identity, "commit", "-qm", "update shared defaults")
+        git(self.root, "push", "-q", "origin", "HEAD")
+        git(teammate, "pull", "--ff-only", "-q")
+        configure_paths(teammate, self.tools())
+
+        self.assertEqual(private, {path: path.read_bytes() for path in private})
+        refreshed = json.loads(settings_path.read_text())
+        self.assertEqual(refreshed["editor.fontSize"], 19)
+        self.assertTrue(refreshed["files.exclude"]["shared-display-rule"])
+        self.assertIn("Updated shared template", (teammate / default_header.relative_to(self.root)).read_text())
+        self.assertEqual(git(teammate, "status", "--porcelain"), "")
 
     def test_zip_excludes_every_local_setting_and_capture_but_keeps_defaults(self):
         configure_paths(self.root, self.tools())

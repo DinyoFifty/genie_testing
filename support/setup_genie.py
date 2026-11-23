@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 from flash import BUILD_TOOLS, PROJECTS, find_tool
 from support.local_config import initialize_local_files
 from support.package_project import build_extension
+from support.trial_storage import migrate_single_trials
 
 SDK_VERSION = "2026.6.2"
 SILABS_PACKAGES = {
@@ -213,6 +214,8 @@ def configure_paths(root, tools):
     workspace_path.write_text(json.dumps(workspace, indent=2) + "\n", encoding="utf-8")
     settings_path = root / ".vscode" / "settings.json"
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    shared_settings = json.loads((root / "support/local_defaults/.vscode/settings.json").read_text(encoding="utf-8"))
+    settings.setdefault("files.exclude", {}).update(shared_settings.get("files.exclude", {}))
     settings["clangd.arguments"] = ["--query-driver=" + compiler]
     settings["python.defaultInterpreterPath"] = "${workspaceFolder}/.venv/Scripts/python.exe"
     settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
@@ -222,6 +225,9 @@ def configure_paths(root, tools):
         configuration["compilerPath"] = compiler
     properties_path.write_text(json.dumps(properties, indent=2) + "\n", encoding="utf-8")
     (root / "data" / "live").mkdir(parents=True, exist_ok=True)
+    migrate_single_trials(root / "data/live")
+    from support.genie_calibration import migrate_batches
+    migrate_batches(root / "data/live", root / "data/calibration")
 
 
 def main():

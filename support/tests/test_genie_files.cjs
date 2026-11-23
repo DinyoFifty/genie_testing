@@ -8,7 +8,7 @@ const vm = require("node:vm");
 async function main() {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "genie-sidebar-test-"));
     const live = path.join(root, "data", "live");
-    const batch = path.join(live, "guided", "Trial1_ANT1-ANT1_2026-11-22_3-44PM");
+    const batch = path.join(live, "guided", "Batch1_ANT1-ANT1");
     const trial = path.join(batch, "1m_Ini0_Ref45");
     const recorded = "2026-11-22T20:44:17Z";
     const commands = new Map();
@@ -63,6 +63,13 @@ async function main() {
                     deleted.push(uri.fsPath);
                     await fs.rm(uri.fsPath, { recursive: true });
                 },
+                async rename(source, destination, options) {
+                    assert.equal(options.overwrite, false);
+                    assert(path.relative(root, destination.fsPath) && !path.relative(root, destination.fsPath).startsWith(".."));
+                    try { await fs.access(destination.fsPath); throw Object.assign(new Error("exists"), { code: "EEXIST" }); }
+                    catch (error) { if (error.code !== "ENOENT") throw error; }
+                    await fs.rename(source.fsPath, destination.fsPath);
+                },
             },
         },
         window: {
@@ -107,10 +114,13 @@ async function main() {
         await fs.writeFile(path.join(root, "analyzer.py"), "fixture");
         await fs.mkdir(path.join(trial, "capture"), { recursive: true });
         await fs.mkdir(path.join(live, "2026-11-22_3-40PM"));
-        await fs.writeFile(path.join(trial, "capture", "summary.json"), JSON.stringify({ session_started_at_utc: recorded }));
+        await fs.writeFile(path.join(trial, "capture", "summary.json"), JSON.stringify({ session_started_at_utc: recorded,
+            calibration: { batch_id: "saved-batch" } }));
         await fs.writeFile(path.join(trial, "measurements.xlsx"), "fixture");
-        await fs.writeFile(path.join(batch, "progress.json"), "{}");
-        await fs.writeFile(path.join(batch, "progress.lock"), "lock");
+        const progressPath = path.join(trial, "capture", "progress.json");
+        const progressBytes = JSON.stringify({ batch_id: "saved-batch", created_at_utc: recorded });
+        await fs.writeFile(progressPath, progressBytes);
+        await fs.writeFile(path.join(batch, ".progress.lock"), "lock");
         const source = await fs.readFile(path.join(__dirname, "../vscode-workflow/extension.js"), "utf8");
         const context = vm.createContext({
             require: name => name === "vscode" ? vscode : require(name), process, module: { exports: {} },
@@ -154,17 +164,37 @@ async function main() {
         assert.equal(liveChildren[0].label, "Guided batches");
         assert.equal(liveChildren[1].label, "2026-11-22_3-40PM");
         const batchItem = (await provider.getChildren(liveChildren[0]))[0];
+        assert.equal(batchItem.label, "Batch1_ANT1-ANT1");
         const contents = await provider.getChildren(batchItem);
-        assert(!contents.some(item => item.label === "progress.lock"));
+        assert.equal(contents[0].label, `Recorded: ${new Date(recorded).toLocaleString("en-US")}`);
+        assert.equal(contents[0].tooltip, recorded);
+        assert.equal(contents[0].command.arguments[0].fsPath, progressPath);
+        assert(!contents.some(item => item.label === "progress.json" || item.label === "progress.lock"));
+        assert(!contents.some(item => item.label === "capture"));
         const condition = contents.find(item => item.label === "1m_Ini0_Ref45");
         const conditionContents = await provider.getChildren(condition);
         assert(conditionContents[0].label.startsWith("Recorded: "));
         assert.equal(conditionContents[0].tooltip, recorded);
         assert(conditionContents.some(item => item.label === "capture"));
         assert(conditionContents.some(item => item.label === "measurements.xlsx"));
+        const stateFiles = await provider.getChildren(conditionContents.find(item => item.label === "capture"));
+        const progressItem = stateFiles.find(item => item.label === "progress.json");
+        assert.equal(progressItem.contextValue, "genieFile");
+
+        // Legacy single trials retain a visible time after their dated folder name changes.
+        const single = liveChildren[1];
+        await fs.mkdir(path.join(single.resourceUri.fsPath, "capture"));
+        await fs.writeFile(path.join(single.resourceUri.fsPath, "capture", "summary.json"), "{}");
+        await fs.writeFile(path.join(single.resourceUri.fsPath, "capture", "measurements.csv"),
+            `source_line,read_at_utc,distanceMain\n1,${recorded},1.2\n`);
+        const singleContents = await provider.getChildren(single);
+        assert(singleContents[0].label.startsWith("First reading: "));
+        assert.equal(singleContents[0].tooltip, recorded);
 
         const remove = commands.get("genieFilesManager.delete");
-        const marker = path.join(batch, "progress.active.json");
+        await remove(progressItem, [progressItem]);
+        assert.equal(deleted.length, 0);
+        const marker = path.join(batch, ".progress.active.json");
         await fs.writeFile(marker, JSON.stringify({ pid: process.pid }));
         await remove(condition, [condition]);
         assert.equal(deleted.length, 0);
@@ -173,12 +203,28 @@ async function main() {
         const workbook = conditionContents.find(item => item.label === "measurements.xlsx");
         await remove(workbook, [workbook]);
         assert.equal(deleted.length, 1);
-        await remove(batchItem, [batchItem]);
+
+        // Deleting the condition holding progress preserves the rest of the batch.
+        const otherTrial = path.join(batch, "2m_Ini0_Ref0");
+        await fs.mkdir(path.join(otherTrial, "capture"), { recursive: true });
+        await fs.writeFile(path.join(otherTrial, "capture", "summary.json"), JSON.stringify({
+            session_started_at_utc: recorded, calibration: { batch_id: "saved-batch" } }));
+        await remove(condition, [condition]);
         assert.equal(deleted.length, 2);
+        const otherProgress = path.join(otherTrial, "capture", "progress.json");
+        assert.equal(await fs.readFile(otherProgress, "utf8"), progressBytes);
+        const otherItem = (await provider.getChildren(batchItem)).find(item => item.label === "2m_Ini0_Ref0");
+        const otherCapture = (await provider.getChildren(otherItem)).find(item => item.label === "capture");
+        await remove(otherCapture, [otherCapture]);
+        assert.equal(deleted.length, 3);
+        assert.equal(await fs.readFile(path.join(batch, ".progress.json"), "utf8"), progressBytes);
+        assert((await provider.getChildren(batchItem))[0].label.startsWith("Recorded: "));
+        await remove(batchItem, [batchItem]);
+        assert.equal(deleted.length, 4);
         await assert.rejects(fs.stat(batch), { code: "ENOENT" });
         assert((await fs.stat(path.join(live, "2026-11-22_3-40PM"))).isDirectory());
         await remove(liveChildren[0], [liveChildren[0]]);
-        assert.equal(deleted.length, 2);
+        assert.equal(deleted.length, 4);
         // A failed arrangement remains retryable and does not prevent the file tree from registering.
         savedState.clear();
         failCommand = "views.moveViewUp";
