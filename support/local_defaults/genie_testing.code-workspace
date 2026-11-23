@@ -10,6 +10,9 @@
     ],
     "C_Cpp.default.compilerPath": "arm-none-eabi-gcc",
     "C_Cpp.default.intelliSenseMode": "windows-gcc-arm",
-    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe"
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+    "extensions.experimental.affinity": {
+      "local-genie.genie-files-manager": 1
+    }
   }
 }

@@ -65,6 +65,28 @@ class LocalConfigurationTests(unittest.TestCase):
         self.assertTrue(refreshed["files.exclude"]["my-personal-folder"])
         self.assertTrue(refreshed["files.exclude"][".venv"])
 
+    def test_setup_isolates_testing_tree_and_preserves_other_extension_settings(self):
+        initialize_local_files(self.root)
+        paths = (self.root / ".vscode/settings.json", self.root / "genie_testing.code-workspace")
+        for path in paths:
+            configuration = json.loads(path.read_text())
+            settings = configuration["settings"] if path.suffix == ".code-workspace" else configuration
+            self.assertEqual(settings["extensions.experimental.affinity"],
+                             {"local-genie.genie-files-manager": 1})
+            # Existing checkouts may lack the new default or have other groups.
+            settings["extensions.experimental.affinity"] = {"personal.extension": 2}
+            settings["editor.fontSize"] = 17
+            path.write_text(json.dumps(configuration), encoding="utf-8")
+
+        configure_paths(self.root, self.tools())
+        configure_paths(self.root, self.tools())
+        for path in paths:
+            configuration = json.loads(path.read_text())
+            settings = configuration["settings"] if path.suffix == ".code-workspace" else configuration
+            self.assertEqual(settings["extensions.experimental.affinity"],
+                             {"personal.extension": 2, "local-genie.genie-files-manager": 1})
+            self.assertEqual(settings["editor.fontSize"], 17)
+
     @unittest.skipUnless(shutil.which("git"), "Git is needed to verify a clean working tree")
     def test_mode_offsets_data_and_setup_paths_do_not_change_git(self):
         def git(*args):

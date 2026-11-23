@@ -204,6 +204,9 @@ def configure_paths(root, tools):
             bluetooth.write_text(json.dumps(configuration, indent=2) + "\n", encoding="utf-8")
 
     compiler = tools["ARM_GCC_DIR"].as_posix()
+    shared_settings = json.loads((root / "support/local_defaults/.vscode/settings.json").read_text(encoding="utf-8"))
+    # Keep the testing tree responsive while Python and firmware extensions load.
+    affinity = shared_settings.get("extensions.experimental.affinity", {})
     workspace_path = root / "genie_testing.code-workspace"
     workspace = json.loads(workspace_path.read_text(encoding="utf-8"))
     workspace["settings"].update({
@@ -211,11 +214,14 @@ def configure_paths(root, tools):
         "C_Cpp.default.compilerPath": compiler,
         "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
     })
+    if affinity:
+        workspace["settings"].setdefault("extensions.experimental.affinity", {}).update(affinity)
     workspace_path.write_text(json.dumps(workspace, indent=2) + "\n", encoding="utf-8")
     settings_path = root / ".vscode" / "settings.json"
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    shared_settings = json.loads((root / "support/local_defaults/.vscode/settings.json").read_text(encoding="utf-8"))
     settings.setdefault("files.exclude", {}).update(shared_settings.get("files.exclude", {}))
+    if affinity:
+        settings.setdefault("extensions.experimental.affinity", {}).update(affinity)
     settings["clangd.arguments"] = ["--query-driver=" + compiler]
     settings["python.defaultInterpreterPath"] = "${workspaceFolder}/.venv/Scripts/python.exe"
     settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")

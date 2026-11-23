@@ -10,5 +10,8 @@
     ".gitignore": true,
     "*.code-workspace": true
   },
-  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe"
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+  "extensions.experimental.affinity": {
+    "local-genie.genie-files-manager": 1
+  }
 }
