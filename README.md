@@ -17,7 +17,7 @@ Using the command line tool included with Simplicity Installer, setup installs m
 
 Setup also creates or repairs the project's local Python environment, installs and checks the Python dependencies, installs the Python, Pylance, Python Debugger, C/C++, and Genie Files extensions, refreshes SDK and compiler paths, and opens [genie_testing.code-workspace](genie_testing.code-workspace). Run setup again after moving the project or pulling updates. It reuses the tools and extensions already installed. These installation scripts support Windows.
 
-**Genie Files** opens first at the top of Explorer. **Outline** and **Timeline** start hidden, and the regular project folders start collapsed. VS Code refreshes once on first open to apply this layout. To restore it later, run **Genie Files: Restore Testing Layout** from the command palette.
+**Genie Files** opens first in its own sidebar tab (the folder icon). The full project is available in the collapsed **genie_testing (project files)** folder at the bottom of the same tree. The regular Explorer remains available from its usual icon. **Outline** and **Timeline** start hidden. To restore this layout, run **Genie Files: Restore Testing Layout** from the command palette.
 
 If setup fails, send the complete error and [data/setup/setup.log](data/setup/setup.log). Once Python starts, [data/setup/setup-report.json](data/setup/setup-report.json) also records the failed stage, discovered tool paths, and checked package versions. Both files stay local and are excluded from Git and the teammate ZIP.
 

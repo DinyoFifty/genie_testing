@@ -173,6 +173,7 @@ class LocalConfigurationTests(unittest.TestCase):
         extension.mkdir(parents=True)
         (extension / "package.json").write_text(json.dumps({"version": "1.2.0"}))
         (extension / "extension.js").write_text("// shared sidebar source")
+        (extension / "genie-files.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
         for relative in ("data/live/trial/capture/raw.jsonl", "data/calibration/batch/progress.json",
                          "data/setup/setup.log", "firmware/board_roles.json", ".venv/pyvenv.cfg",
                          "firmware/bt_cs_ncp/autogen/.slc_state/.crc_config.crc"):

@@ -33,7 +33,7 @@ async function activate(context) {
 
     async function prepareLayout() {
         // Use VS Code's view commands so its own layout persistence stays in charge.
-        await vscode.commands.executeCommand("workbench.view.explorer");
+        await vscode.commands.executeCommand("workbench.view.extension.genieFiles");
         await vscode.commands.executeCommand("genie.files.manager.open", { preserveFocus: true });
         const available = await vscode.commands.getCommands(true);
         for (const view of ["outline", "timeline"]) {
@@ -43,16 +43,7 @@ async function activate(context) {
         }
         await vscode.workspace.getConfiguration("explorer", workspace.uri).update(
             "autoReveal", false, vscode.ConfigurationTarget.Workspace);
-        await vscode.commands.executeCommand("workbench.files.action.collapseExplorerFolders");
-        // At most one move per registered view is enough to reach the top.
-        const viewCount = available.filter(command => command.endsWith(".removeView")).length;
-        for (let index = 0; index < viewCount; index++) {
-            await vscode.commands.executeCommand("genie.files.manager.focus");
-            await vscode.commands.executeCommand("views.moveViewUp");
-        }
-        await context.workspaceState.update("testingLayoutVersion", 1);
-        // VS Code's move command saves the order; one refresh applies it to existing panes.
-        await vscode.commands.executeCommand("workbench.action.reloadWindow");
+        await context.workspaceState.update("testingLayoutVersion", 2);
     }
 
     function isLiveEntry(filePath, base = liveRoot) {
@@ -97,8 +88,9 @@ async function activate(context) {
         }
     }
 
-    function file(relativePath, label = path.basename(relativePath)) {
+    function file(relativePath, label = path.basename(relativePath), branch = "testing") {
         const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
+        item.id = `${branch}:file:${path.normalize(relativePath)}`;
         item.resourceUri = vscode.Uri.file(path.join(root, relativePath));
         item.tooltip = item.resourceUri.fsPath;
         if (relativePath === "results.py") item.tooltip = "Review batches, test setup, measurement evidence, and the master workbook.";
@@ -111,14 +103,16 @@ async function activate(context) {
 
     function offsets(label, project) {
         const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.Collapsed);
+        item.id = `offsets:${project}`;
         item.iconPath = new vscode.ThemeIcon("folder");
         item.offsetPath = path.join("firmware", project, "config", offsetHeader);
         return item;
     }
 
-    function folder(relativePath, label = path.basename(relativePath)) {
+    function folder(relativePath, label = path.basename(relativePath), branch = "testing") {
         const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.Collapsed);
-        item.id = relativePath;
+        item.id = `${branch}:folder:${path.normalize(relativePath)}`;
+        item.branch = branch;
         item.iconPath = new vscode.ThemeIcon("folder");
         item.resourceUri = vscode.Uri.file(path.join(root, relativePath));
         item.relativePath = relativePath;
@@ -131,8 +125,10 @@ async function activate(context) {
         onDidChangeTreeData: changes.event,
         getTreeItem: item => item,
         async getChildren(item) {
-            if (item?.offsetPath) return [file(item.offsetPath)];
-            if (item?.relativePath === "data") return [folder(path.join("data", "live"))];
+            if (item?.offsetPath) return [file(item.offsetPath, offsetHeader, item.id)];
+            if (item?.relativePath === "data" && item.branch === "testing") {
+                return [folder(path.join("data", "live"))];
+            }
             if (item?.relativePath) {
                 let entries;
                 try {
@@ -151,14 +147,16 @@ async function activate(context) {
                     return directoryOrder || first[0].localeCompare(second[0], undefined, { numeric: true });
                 });
                 entries = entries.filter(([name]) => !name.startsWith(".")
-                    && !["progress.lock", "progress.active.json"].includes(name));
+                    && !["progress.lock", "progress.active.json", "__pycache__"].includes(name)
+                    && !name.endsWith(".code-workspace"));
                 const children = entries.map(([name, type]) => {
                     const relativePath = path.join(item.relativePath, name);
                     const label = name === "guided" ? "Guided batches" : name === "_incomplete" ? "Interrupted captures" : name;
-                    return type & vscode.FileType.Directory ? folder(relativePath, label) : file(relativePath);
+                    return type & vscode.FileType.Directory ? folder(relativePath, label, item.branch)
+                        : file(relativePath, name, item.branch);
                 });
                 if (item.resourceUri.fsPath === liveRoot && !entries.some(([name]) => name === "guided")) {
-                    children.unshift(folder(path.join(item.relativePath, "guided"), "Guided batches"));
+                    children.unshift(folder(path.join(item.relativePath, "guided"), "Guided batches", item.branch));
                 }
                 try {
                     const batch = path.dirname(item.resourceUri.fsPath) === guidedRoot;
@@ -180,6 +178,7 @@ async function activate(context) {
                     if (recorded && Number.isFinite(Date.parse(recorded))) {
                         const detail = new vscode.TreeItem(`${timeLabel}: ${new Date(recorded).toLocaleString("en-US")}`,
                             vscode.TreeItemCollapsibleState.None);
+                        detail.id = `${item.id}:recorded`;
                         detail.iconPath = new vscode.ThemeIcon("clock");
                         detail.tooltip = recorded;
                         detail.command = { command: "vscode.open", title: batch ? "Batch details" : "Trial details",
@@ -198,12 +197,21 @@ async function activate(context) {
                 ...scripts.map(name => file(name)),
                 master,
                 folder("data"),
+                folder(".", `${path.basename(root)} (project files)`, "project"),
             ];
         },
     };
 
     const liveChanges = vscode.workspace.createFileSystemWatcher(
         new vscode.RelativePattern(workspace, "data/**"));
+    let refreshTimer;
+    function scheduleRefresh() {
+        if (refreshTimer) clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(() => {
+            refreshTimer = undefined;
+            changes.fire();
+        }, 150);
+    }
     context.subscriptions.push(
         changes,
         liveChanges,
@@ -289,21 +297,23 @@ async function activate(context) {
                 await vscode.window.showErrorMessage(`Could not move the selected items to the Recycle Bin. ${error.message}`);
             }
         }),
-        liveChanges.onDidCreate(() => changes.fire()),
-        liveChanges.onDidChange(() => changes.fire()),
-        liveChanges.onDidDelete(() => changes.fire()),
-        vscode.workspace.onDidCreateFiles(() => changes.fire()),
-        vscode.workspace.onDidRenameFiles(() => changes.fire()),
-        vscode.workspace.onDidDeleteFiles(() => changes.fire()),
+        liveChanges.onDidCreate(scheduleRefresh),
+        liveChanges.onDidChange(uri => {
+            if (["summary.json", "progress.json", ".progress.json"].includes(path.basename(uri.fsPath))) scheduleRefresh();
+        }),
+        liveChanges.onDidDelete(scheduleRefresh),
+        vscode.workspace.onDidCreateFiles(scheduleRefresh),
+        vscode.workspace.onDidRenameFiles(scheduleRefresh),
+        vscode.workspace.onDidDeleteFiles(scheduleRefresh),
+        { dispose: () => clearTimeout(refreshTimer) },
     );
     // Opening our own view during activation would wait on this activation promise.
     const startup = setTimeout(async () => {
         try {
-            if (context.workspaceState.get("testingLayoutVersion") !== 1) {
+            if (context.workspaceState.get("testingLayoutVersion") !== 2) {
                 await prepareLayout();
             } else {
                 await vscode.commands.executeCommand("genie.files.manager.open", { preserveFocus: true });
-                await vscode.commands.executeCommand("workbench.files.action.collapseExplorerFolders");
             }
         } catch (error) {
             await vscode.window.showWarningMessage(

@@ -39,7 +39,7 @@ def build_extension(root):
     with zipfile.ZipFile(extension / "genie-files-manager.vsix", "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("extension.vsixmanifest", xml)
         archive.writestr("[Content_Types].xml", content_types)
-        for name in ("package.json", "extension.js"):
+        for name in ("package.json", "extension.js", "genie-files.svg"):
             archive.write(extension / name, "extension/" + name)
 
 

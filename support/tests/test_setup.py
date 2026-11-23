@@ -129,6 +129,7 @@ class SetupTests(unittest.TestCase):
                 "publisher": "local-genie", "name": "genie-files-manager", "version": "1.2.0",
             }))
             (extension / "extension.js").write_text("// shared sidebar source")
+            (extension / "genie-files.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
             installed = "\n".join(item + "@1.0.0" for item in setup_genie.EXTENSIONS)
             with patch.object(setup_genie, "ROOT", root), patch.object(
                 setup_genie.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, installed),
@@ -136,6 +137,8 @@ class SetupTests(unittest.TestCase):
                 setup_genie.install_extensions(Path("code.cmd"))
             installer = extension / "genie-files-manager.vsix"
             self.assertTrue(zipfile.is_zipfile(installer))
+            with zipfile.ZipFile(installer) as archive:
+                self.assertIn("extension/genie-files.svg", archive.namelist())
             self.assertIn(str(installer), execute.call_args.args[0])
 
     def test_package_keeps_sdk_libraries_and_excludes_local_builds(self):
@@ -145,6 +148,7 @@ class SetupTests(unittest.TestCase):
             extension.mkdir(parents=True)
             (extension / "package.json").write_text('{"version":"1.2.0"}')
             (extension / "extension.js").write_text("// extension fixture")
+            (extension / "genie-files.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
             for name in (
                 "firmware/bt_cs_ncp/simplicity_sdk_2026.6.2/bgapi/build/gcc/libbgapi.a",
                 "firmware/bt_cs_ncp/cmake_gcc/build/CMakeCache.txt",

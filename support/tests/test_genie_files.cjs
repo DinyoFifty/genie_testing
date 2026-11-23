@@ -6,6 +6,13 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 async function main() {
+    const manifest = JSON.parse(await fs.readFile(path.join(__dirname, "../vscode-workflow/package.json"), "utf8"));
+    assert(!manifest.contributes.views.explorer, "Keep Genie Files out of the resizable Explorer stack");
+    assert.equal(manifest.contributes.views.genieFiles[0].id, "genie.files.manager");
+    assert.equal(manifest.contributes.viewsContainers.activitybar[0].id, "genieFiles");
+    assert(manifest.activationEvents.includes("workspaceContains:setup.cmd"));
+    assert(!manifest.activationEvents.includes("onStartupFinished"), "The file list must not wait for delayed startup");
+    assert(!manifest.activationEvents.includes("*"), "Only activate in a matching project or when its view is requested");
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "genie-sidebar-test-"));
     const live = path.join(root, "data", "live");
     const batch = path.join(live, "guided", "Batch1_ANT1-ANT1");
@@ -26,13 +33,17 @@ async function main() {
     let failCommand;
     let activationReturned = false;
     const startupTasks = [];
+    const watcherHandlers = new Map();
+    let refreshes = 0;
     let provider;
+    let directoryReads = 0;
     const disposable = { dispose() {} };
-    const events = { onDidCreate: () => disposable, onDidChange: () => disposable, onDidDelete: () => disposable };
+    const events = Object.fromEntries(["Create", "Change", "Delete"].map(name =>
+        [`onDid${name}`, callback => { watcherHandlers.set(name, callback); return disposable; }]));
     const vscode = {
         TreeItem: class { constructor(label) { this.label = label; } },
         TreeItemCollapsibleState: { None: 0, Collapsed: 1 },
-        EventEmitter: class { constructor() { this.event = () => disposable; } fire() {} },
+        EventEmitter: class { constructor() { this.event = () => disposable; } fire() { refreshes++; } },
         ThemeIcon: class {}, RelativePattern: class {}, Uri: { file: fsPath => ({ fsPath }) },
         FileType: { File: 1, Directory: 2 },
         ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
@@ -53,6 +64,7 @@ async function main() {
             onDidCreateFiles: () => disposable, onDidRenameFiles: () => disposable, onDidDeleteFiles: () => disposable,
             fs: {
                 async readDirectory(uri) {
+                    directoryReads++;
                     const entries = await fs.readdir(uri.fsPath, { withFileTypes: true });
                     return entries.map(entry => [entry.name, entry.isDirectory() ? 2 : 1]);
                 },
@@ -103,7 +115,7 @@ async function main() {
                 } else if (name === "workbench.files.action.collapseExplorerFolders") {
                     collapsed = true;
                 } else if (name === "workbench.action.reloadWindow") {
-                    assert.equal(savedState.get("testingLayoutVersion"), 1, "Save completion before reloading to avoid a loop");
+                    assert.fail("Arranging the sidebar must not reload the user's workspace");
                     visibleViews = viewOrder.filter(id => visibleViews.includes(id));
                 }
             },
@@ -125,7 +137,10 @@ async function main() {
         const context = vm.createContext({
             require: name => name === "vscode" ? vscode : require(name), process, module: { exports: {} },
             setTimeout: callback => { startupTasks.push(callback); return callback; },
-            clearTimeout() {},
+            clearTimeout(callback) {
+                const index = startupTasks.indexOf(callback);
+                if (index >= 0) startupTasks.splice(index, 1);
+            },
         });
         vm.runInContext(source, context);
         const extensionContext = {
@@ -139,30 +154,67 @@ async function main() {
             while (startupTasks.length) await startupTasks.shift()();
         }
         await activate();
-        assert.deepEqual(visibleViews, ["genie.files.manager", "workbench.explorer.openEditorsView",
-            "workbench.explorer.fileView", "fixture.other"]);
-        assert.equal(collapsed, true);
+        assert.equal(directoryReads, 0, "Register the sidebar without scanning recordings or firmware folders");
+        assert.equal((await provider.getChildren()).length, 12);
+        assert.equal(directoryReads, 0, "The initial file list must not need folder enumeration");
+        assert(!visibleViews.includes("outline") && !visibleViews.includes("timeline"));
+        assert(visibleViews.includes("workbench.explorer.fileView"), "Keep the regular Explorer available");
+        assert(executed.some(([name]) => name === "workbench.view.extension.genieFiles"));
+        assert.equal(collapsed, false);
         assert.equal(autoReveal, false);
-        assert.equal(savedState.get("testingLayoutVersion"), 1);
-        assert.equal(executed.filter(([name]) => name === "workbench.action.reloadWindow").length, 1);
+        assert.equal(savedState.get("testingLayoutVersion"), 2);
+        assert.equal(executed.filter(([name]) => name === "workbench.action.reloadWindow").length, 0);
 
         // Opening the workspace again shows Genie Files without undoing a teammate's changes.
         visibleViews.push("outline");
         collapsed = false;
         executed.length = 0;
         await activate();
-        assert.equal(collapsed, true);
+        assert.equal(collapsed, false);
         assert(visibleViews.includes("outline"));
         assert(executed.some(([name]) => name === "genie.files.manager.open"));
         assert(!executed.some(([name]) => name.endsWith(".removeView") || name === "views.moveViewUp"
             || name === "workbench.action.reloadWindow"));
         await commands.get("genieFilesManager.prepareLayout")();
         assert(!visibleViews.includes("outline"));
+        savedState.set("testingLayoutVersion", 1);
+        await activate();
+        assert.equal(savedState.get("testingLayoutVersion"), 2);
+        assert(visibleViews.includes("workbench.explorer.fileView"));
         const data = (await provider.getChildren()).find(item => item.label === "data");
         const master = (await provider.getChildren()).find(item => item.label === "Master results.xlsx");
         assert.equal(master.command.command, "genieFilesManager.openResults");
         assert(commands.has("genieFilesManager.openResults"));
         assert((await provider.getChildren()).some(item => item.label === "results.py"));
+        const project = (await provider.getChildren()).find(item => item.relativePath === ".");
+        assert(project.label.endsWith(" (project files)"));
+        const projectChildren = await provider.getChildren(project);
+        const projectAnalyzer = projectChildren.find(item => item.label === "analyzer.py");
+        const quickAnalyzer = (await provider.getChildren()).find(item => item.label === "analyzer.py");
+        assert.equal(projectAnalyzer.resourceUri.fsPath, quickAnalyzer.resourceUri.fsPath);
+        assert.notEqual(projectAnalyzer.id, quickAnalyzer.id, "The two shortcuts must have distinct tree identities");
+        assert.equal((await provider.getChildren()).find(item => item.label === "analyzer.py").id, quickAnalyzer.id);
+        const identities = new Set();
+        async function checkIdentities(parent) {
+            for (const child of await provider.getChildren(parent)) {
+                assert(child.id && !identities.has(child.id), `Repeated tree identity: ${child.id}`);
+                identities.add(child.id);
+                if (child.collapsibleState !== 0 && (child.relativePath || child.offsetPath)) await checkIdentities(child);
+            }
+        }
+        await checkIdentities();
+
+        // Streaming samples and workbook writes should not rebuild the file tree.
+        watcherHandlers.get("Change")({ fsPath: path.join(trial, "capture", "raw.jsonl") });
+        watcherHandlers.get("Change")({ fsPath: path.join(root, "data", "results", "master_results.xlsx") });
+        assert.equal(startupTasks.length, 0);
+        const beforeRefresh = refreshes;
+        watcherHandlers.get("Create")();
+        watcherHandlers.get("Change")({ fsPath: path.join(trial, "capture", "summary.json") });
+        watcherHandlers.get("Delete")();
+        assert.equal(startupTasks.length, 1, "One refresh should cover a burst of changes");
+        await startupTasks.shift()();
+        assert.equal(refreshes, beforeRefresh + 1);
         const liveItem = (await provider.getChildren(data))[0];
         const liveChildren = await provider.getChildren(liveItem);
         assert.equal(liveChildren[0].label, "Guided batches");
@@ -231,12 +283,12 @@ async function main() {
         assert.equal(deleted.length, 4);
         // A failed arrangement remains retryable and does not prevent the file tree from registering.
         savedState.clear();
-        failCommand = "views.moveViewUp";
+        failCommand = "workbench.view.extension.genieFiles";
         await activate();
         assert.equal(savedState.get("testingLayoutVersion"), undefined);
         failCommand = undefined;
         await commands.get("genieFilesManager.prepareLayout")();
-        assert.equal(savedState.get("testingLayoutVersion"), 1);
+        assert.equal(savedState.get("testingLayoutVersion"), 2);
 
         // Installing the extension does not rearrange an unrelated project.
         vscode.workspace.workspaceFolders = [{ uri: { fsPath: path.join(root, "unrelated") } }];
